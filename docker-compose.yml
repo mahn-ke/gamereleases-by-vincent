@@ -4,3 +4,7 @@ services:
   app:
     image: ghcr.io/mahn-ke/gamereleases-by-vincent:latest
     restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - RELEASES_COOKIE=${RELEASES_COOKIE}

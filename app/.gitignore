@@ -137,3 +137,6 @@ dist
 # Vite logs files
 vite.config.ts.timestamp-*
 vite.config.js.timestamp-*
+
+# Project specifics
+releases.ics
