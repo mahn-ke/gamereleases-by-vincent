@@ -35,6 +35,13 @@ async function fetchEventsForCode(code) {
     const data = "<html>" + await response.text() + "</html>";
     const $ = cheerio.load(data);
     const events = [];
+    
+    // a calendar with no mad_active means we haven't received a personalized response, likely due to an invalid cookie
+    if ($(".RWP-Calendar-Group").length >= 1 && $('.mad_active').length <= 0) {
+        console.error('Cookie no longer valid; please update it in the environment variable RELEASES_COOKIE');
+        process.exit(1);
+    }
+
     $('.RWP-Calendar-Group-List > div').each((_, el) => {
         const dateDesc = $(el).find('.RWPCC-CalendarItems-DateDescControl').text();
         const date = parseRelativeDate(dateDesc);
@@ -46,6 +53,7 @@ async function fetchEventsForCode(code) {
             date: moment(date).format('YYYY-MM-DD')
         });
     });
+    console.log({code, events: events.flat().map(e => `${e.summary}: ${e.date}`).filter(a => !!a)});
     return events;
 }
 
