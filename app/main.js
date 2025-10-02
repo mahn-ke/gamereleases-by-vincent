@@ -6,7 +6,11 @@ const bree = new Bree({
             timeout: 0,
             interval: '5m'
         }
-    ]
+    ],
+    errorHandler: (error) => {
+        console.error('Bree job error:', error);
+        process.exit(1);
+    }
 });
 
 bree.start();
