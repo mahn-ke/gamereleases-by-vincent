@@ -4,13 +4,12 @@ resource "random_password" "ddns_password" {
 }
 
 locals {
-  subdomain_label = replace(replace(basename(dirname(path.cwd)), "-by-vincent", ""), "-", ".")
+  subdomain_label = replace(basename(dirname(path.cwd)), "-", ".")
 }
 
-resource "allinkl_ddns" "subdomain" {
-  dyndns_comment   = replace(local.subdomain_label, ".", "_")
-  dyndns_password  = random_password.ddns_password.result
-  dyndns_zone      = "mahn.ke"
-  dyndns_label     = "${local.subdomain_label}.by.vincent"
-  dyndns_target_ip = "88.99.215.101"
+resource "allinkl_dns" "subdomain" {
+  zone_host   = "mahn.ke"
+  record_type = "A"
+  record_name = local.subdomain_label
+  record_data = "88.99.215.101"
 }
