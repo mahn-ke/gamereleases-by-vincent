@@ -1,8 +1,3 @@
-resource "random_password" "ddns_password" {
-  length  = 30
-  special = false
-}
-
 locals {
   subdomain_label = replace(basename(dirname(path.cwd)), "-", ".")
 }
