@@ -3,7 +3,7 @@ version: "3.8"
 
 services:
   app:
-    image: ghcr.io/mahn-ke/gamereleases-by-vincent:latest@sha256:a3962f7b449e2c84a69d73bf1720dcbd438b917b21b1bed720f62c375b1955b8
+    image: ghcr.io/mahn-ke/gamereleases-by-vincent:latest@sha256:71cc50cedb70304ba3ab37a2df497cc130f2618694a72e3ceda1c1f2f2d534d1
     restart: on-failure:5
     ports:
       - "3000:3000"
