@@ -9,8 +9,16 @@ services:
       - "3000:3000"
     environment:
       - RELEASES_COOKIE=${RELEASES_COOKIE}
+      - RELEASES_EMAIL=${RELEASES_EMAIL}
+      - RELEASES_PASSWORD=${RELEASES_PASSWORD}
+      - DATA_DIR=/app/data
+    volumes:
+      - data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/releases.ics"]
       interval: 30s
       timeout: 10s
       retries: 5
+
+volumes:
+  data:

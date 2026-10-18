@@ -140,3 +140,5 @@ vite.config.js.timestamp-*
 
 # Project specifics
 releases.ics
+# Persisted releases.com session
+data/

@@ -1,77 +1,187 @@
 import * as cheerio from 'cheerio';
 import ical from 'ical-generator';
-import moment from 'moment';
-import { writeFileSync } from 'fs';
+import { Impit } from 'impit';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import path from 'path';
 
-function parseRelativeDate(desc) {
-    const now = moment();
-    desc = desc.trim();
-    if (/Yesterday/i.test(desc)) return now.clone().subtract(1, 'days').toDate();
-    if (/Today/i.test(desc)) return now.clone().toDate();
-    if (/Tomorrow/i.test(desc)) return now.clone().add(1, 'days').toDate();
-    let match;
-    if ((match = desc.match(/(\d+)\s+days?\s+ago/i))) return now.clone().subtract(parseInt(match[1]), 'days').toDate();
-    if ((match = desc.match(/in\s+(\d+)\s+days?/i))) return now.clone().add(parseInt(match[1]), 'days').toDate();
-    // fallback: try to parse as date
-    const parsed = moment(desc, moment.ISO_8601, true);
-    if (parsed.isValid()) return parsed.toDate();
-    return null;
+const BASE_URL = 'https://www.releases.com';
+const AUTH_COOKIE = '.AspNetCore.Cookies';
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const SESSION_FILE = path.join(DATA_DIR, 'session.json');
+const OUTPUT_FILE = path.join(process.cwd(), 'releases.ics');
+const MAX_GROUPS = 500;
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+// releases.com sits behind Cloudflare bot management, which rejects non-browser TLS fingerprints
+const impit = new Impit({ browser: 'chrome' });
+
+function loadSessionCookie() {
+    if (existsSync(SESSION_FILE)) {
+        try {
+            const { cookie } = JSON.parse(readFileSync(SESSION_FILE, 'utf8'));
+            if (cookie) return cookie;
+        } catch (error) {
+            console.warn('Ignoring unreadable session file:', error.message);
+        }
+    }
+    return process.env.RELEASES_COOKIE || null;
 }
 
-const codes = [
-    'bp-Past', 'bp-SomeYearsAgo', 'bp-LastYear', 'bp-EarlierThisYear',
-    'bp-Recent', 'bp-Today', 'bp-ComingSoon', 'bp-LaterThisYear',
-    'bp-NextYear', 'bp-InSomeYears', 'bp-Future', 'bp-TBA'
-];
+function saveSessionCookie(cookie) {
+    mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(SESSION_FILE, JSON.stringify({ cookie, updatedAt: new Date().toISOString() }), { mode: 0o600 });
+}
 
-async function fetchEventsForCode(code) {
-    const url = `https://www.releases.com/partial/Releases.Www.PL.Calendar.Group?Code=${code}&Category=tracking&Section=Tracking&Interval=Breakpoints&Direction=Forward&GroupMode=Feed`;
-    const cookie = process.env.RELEASES_COOKIE || '';
-    const response = await fetch(url, {
-        headers: {
-            Cookie: `.AspNetCore.Cookies=${cookie}; `
-        }
-    });
-    const data = "<html>" + await response.text() + "</html>";
-    const $ = cheerio.load(data);
-    const events = [];
-    
-    // a calendar with no mad_active means we haven't received a personalized response, likely due to an invalid cookie
-    if ($(".RWP-Calendar-Group").length >= 1 && $('.mad_active').length <= 0) {
-        console.error('Cookie no longer valid; please update it in the environment variable RELEASES_COOKIE');
-        process.exit(1);
+class ReleasesClient {
+    constructor(cookie) {
+        this.cookie = cookie;
     }
 
-    $('.RWP-Calendar-Group-List > div').each((_, el) => {
-        const dateDesc = $(el).find('.RWPCC-CalendarItems-DateDescControl').text();
-        const date = parseRelativeDate(dateDesc);
-        if (!date) return;
-        const name = $(el).find('.RWPCC-CalendarItems-CardControl-Name').text().trim();
-        const types = $(el).find('.RWPCC-CalendarItems-TypeAndVersionsControl').text().trim();
-        events.push({
-            summary: `${name} (${types})`,
-            date: moment(date).format('YYYY-MM-DD')
+    async request(urlPath, options = {}) {
+        const headers = { 'X-Requested-With': 'XMLHttpRequest', ...options.headers };
+        if (this.cookie) headers.Cookie = `${AUTH_COOKIE}=${this.cookie}`;
+        const response = await impit.fetch(BASE_URL + urlPath, { ...options, headers });
+        this.captureRenewedCookie(response);
+        const text = await response.text();
+        if (!response.ok) {
+            throw new Error(`${options.method || 'GET'} ${urlPath} failed with HTTP ${response.status}`);
+        }
+        return text;
+    }
+
+    // ASP.NET Core sliding expiration re-issues the auth cookie; persisting it keeps the session alive
+    captureRenewedCookie(response) {
+        const setCookie = response.headers.get('set-cookie') || '';
+        const match = setCookie.match(new RegExp(`${AUTH_COOKIE.replace(/\./g, '\\.')}=([^;,\\s]+)`));
+        if (match && match[1] !== this.cookie) {
+            this.cookie = match[1];
+            saveSessionCookie(this.cookie);
+            console.log('Stored renewed session cookie');
+        }
+    }
+
+    async isLoggedIn() {
+        if (!this.cookie) return false;
+        const $ = cheerio.load(await this.request('/calendar/tracking'));
+        return !!$('[data-metuserid]').attr('data-metuserid');
+    }
+
+    async login(email, password) {
+        this.cookie = null;
+        const body = new URLSearchParams({ Email: email, Password: password }).toString();
+        const result = JSON.parse(await this.request('/partial/Releases.Core.BL.Accounts.CookieLogin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            body
+        }));
+        if (!result.Success || !this.cookie) {
+            const reason = (result.Errors || []).map(e => e.Value).join(', ') || 'no session cookie returned';
+            throw new Error(`Login failed: ${reason}`);
+        }
+        console.log('Logged in with RELEASES_EMAIL/RELEASES_PASSWORD');
+    }
+
+    async fetchGroup(code) {
+        const query = new URLSearchParams({
+            Code: code,
+            Category: 'tracking',
+            Section: 'Calendar',
+            Interval: 'Dates',
+            Direction: 'Forward',
+            GroupMode: 'Feed'
+        });
+        return this.request(`/partial/Releases.Www.PL.Calendar.Group?${query}`);
+    }
+}
+
+async function authenticate() {
+    const client = new ReleasesClient(loadSessionCookie());
+    if (await client.isLoggedIn()) return client;
+
+    const { RELEASES_EMAIL: email, RELEASES_PASSWORD: password } = process.env;
+    if (!email || !password) {
+        throw new Error('Not logged in to releases.com: RELEASES_COOKIE is missing or expired and RELEASES_EMAIL/RELEASES_PASSWORD are not set');
+    }
+    await client.login(email, password);
+    if (!(await client.isLoggedIn())) throw new Error('Login succeeded but session is not authenticated');
+    saveSessionCookie(client.cookie);
+    return client;
+}
+
+// data-calendarcode is e.g. "2026-oct-22" for exact dates; estimates look like "2026-q4-est" or "2026-est"
+function parseCalendarCode(calendarCode) {
+    const match = /^(\d{4})-([a-z]{3})-(\d{1,2})$/.exec(calendarCode || '');
+    if (!match) return null;
+    const month = MONTHS.indexOf(match[2]);
+    if (month < 0) return null;
+    return new Date(Date.UTC(Number(match[1]), month, Number(match[3])));
+}
+
+function parseGroup(html) {
+    const $ = cheerio.load(html);
+    const releases = [];
+    $('.RWP-Calendar-Group').each((_, group) => {
+        const calendarCode = $(group).attr('data-calendarcode');
+        const date = parseCalendarCode(calendarCode);
+        $(group).find('.RWPCC-CalendarItems-CardControl').each((_, card) => {
+            const nameEl = $(card).find('a.RWPCC-CalendarItems-CardControl-Name');
+            const name = nameEl.text().trim();
+            if (!name) return;
+            const versions = $(card).find('.RWPCC-CalendarItems-TypeAndVersionsControl-Version')
+                .map((_, v) => $(v).clone().children('.RWPCC-CalendarItems-TypeAndVersionsControl-Divider').remove().end().text().trim())
+                .get()
+                .filter(Boolean);
+            releases.push({ name, versions, href: nameEl.attr('href'), date, estimate: date ? null : calendarCode });
         });
     });
-    console.log({code, events: events.flat().map(e => `${e.summary}: ${e.date}`).filter(a => !!a)});
-    return events;
+    const nextUrl = $('.RWPCC-InfinityDown-InfinityDownControl[data-ui-url]').last().attr('data-ui-url');
+    const nextCode = nextUrl ? new URLSearchParams(nextUrl.split('?')[1]).get('Code') : null;
+    return { releases, nextCode };
+}
+
+async function fetchUpcomingReleases(client) {
+    const today = new Date();
+    let code = `Y${today.getUTCFullYear()}-M${today.getUTCMonth() + 1}-D${today.getUTCDate()}`;
+    const seenCodes = new Set();
+    const releases = [];
+    while (code && !seenCodes.has(code) && seenCodes.size < MAX_GROUPS) {
+        seenCodes.add(code);
+        const group = parseGroup(await client.fetchGroup(code));
+        releases.push(...group.releases);
+        code = group.nextCode;
+    }
+    return releases;
 }
 
 const refreshCalendar = async () => {
+    const client = await authenticate();
+    const releases = await fetchUpcomingReleases(client);
+
     const cal = ical({ name: 'Releases.com Calendar' });
-    for (const code of codes) {
-        const events = await fetchEventsForCode(code);
-        for (const event of events) {
-            cal.createEvent({
-                start: event.date,
-                allDay: true,
-                summary: event.summary
-            });
+    for (const release of releases) {
+        if (!release.date) {
+            console.log(`Skipping ${release.name}: no exact date (${release.estimate})`);
+            continue;
         }
+        const slug = release.href?.replace(/^\/p\//, '') || release.name;
+        const day = release.date.toISOString().slice(0, 10);
+        cal.createEvent({
+            id: `${slug}-${day}@releases.com`,
+            start: release.date,
+            allDay: true,
+            summary: release.versions.length ? `${release.name} (${release.versions.join(' / ')})` : release.name,
+            url: release.href ? BASE_URL + release.href : undefined
+        });
+        console.log(`${day}: ${release.name}`);
     }
-    const icsString = cal.toString();
-    writeFileSync('releases.ics', icsString);
-    console.log('iCal file generated: releases.ics');
+
+    const tmpFile = `${OUTPUT_FILE}.tmp`;
+    writeFileSync(tmpFile, cal.toString());
+    renameSync(tmpFile, OUTPUT_FILE);
+    console.log(`iCal file generated: ${OUTPUT_FILE} (${cal.events().length} events)`);
 };
 
-refreshCalendar().catch(console.error);
+refreshCalendar().catch((error) => {
+    console.error(error);
+    process.exit(1);
+});
