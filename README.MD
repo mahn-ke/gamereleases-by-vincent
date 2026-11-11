@@ -1,18 +1,39 @@
 # gamereleases.by.vincent.mahn.ke
 
-Hosts the container generating the calendar file at [gamereleases.by.vincent.mahn.ke/releases.ics](https://gamereleases.by.vincent.mahn.ke/releases.ics).
+A game release calendar at [gamereleases.by.vincent.mahn.ke](https://gamereleases.by.vincent.mahn.ke), laid out like releases.com:
+covers, platforms, trailers and a reminder bell per game.
 
-releases.com allows users to watch media release dates and sends emails when they change or occur. This script reads the logged-in user's tracked releases (`/calendar/tracking`, grouped by exact date) every 5 minutes and exposes them as an `.ics` file that calendar clients can subscribe to. Releases that only have an estimated date (quarter/year) are skipped.
+- **Browse** upcoming releases by day (`/`), the most anticipated ones (`/hot`), or search all of IGDB (`/search`). Filter by platform.
+- **Remind**: log in with the SSO account (sso.by.vincent.mahn.ke) and click a game's bell. The number next to it counts everyone on this server who tracks it.
+- **Email**: at 00:00 Europe/Berlin on the day before a tracked game releases, one mail per user goes to the address on their SSO account. Each game and day is mailed once; runs missed during downtime are caught up the same day.
+- **Calendar feed**: `/reminders` shows a personal `https://gamereleases.by.vincent.mahn.ke/<username>/<secret>.ics` subscription. It needs no login, tells clients to refresh every 6 hours, and can be regenerated at any time, which immediately disables the old address.
 
-releases.com has no public or mobile API and is behind Cloudflare bot protection, so requests are sent with a Chrome TLS fingerprint via [impit](https://github.com/apify/impit).
+## Data
 
-## Authentication
+Release dates, covers and trailers come from [IGDB](https://api-docs.igdb.com). Releases dated only to a month, quarter or year are not shown on the calendar. Every 6 hours the app syncs games releasing from 14 days ago to 180 days ahead, plus every tracked game. Release days are the UTC calendar days IGDB publishes.
 
-Configure at least one of:
+releases.com is no longer used: it has no API and blocks automated clients with a Cloudflare challenge.
 
-| Variable | Description |
+State (users, reminders, cached games) lives in SQLite at `DATA_DIR` (`/app/data`, the `data` volume, which is backed up).
+
+## Configuration
+
+| Variable | Source |
 | --- | --- |
-| `RELEASES_EMAIL` / `RELEASES_PASSWORD` | Email/password login; used to log in automatically whenever the session is missing or expired. Accounts created via Google/Apple sign-in can set a password via "Forgot password?" on the login page. |
-| `RELEASES_COOKIE` | Value of the `.AspNetCore.Cookies` cookie from a logged-in browser session (valid for ~14 days). |
+| `OAUTH_URL`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_NAME` | Repository secrets managed by `mahn-ke/repos` (`oauth_clients`) |
+| `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET` | Repository secrets from a [Twitch developer application](https://dev.twitch.tv/console/apps) (client credentials, used for IGDB) |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY` (`starttls`, `force_tls` or `off`), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | Organization secrets |
+| `APP_BASE_URL` | Public origin; used for the SSO redirect and feed URLs |
 
-Renewed session cookies are persisted to `DATA_DIR` (`/app/data`, a docker volume) and take precedence over `RELEASES_COOKIE`.
+Without IGDB credentials the app still serves cached data; without SMTP settings it skips mails. `/healthz` reports which integrations are configured.
+
+## Development
+
+```sh
+cd app
+npm ci
+npm test
+DATA_DIR=./data APP_BASE_URL=http://localhost:3000 npm start
+```
+
+The Docker build runs the test suite, so a failing test fails the deployment.
