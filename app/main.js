@@ -1,55 +1,34 @@
-import Bree from 'bree';
-const bree = new Bree({
-    jobs: [
-        {
-            name: 'refreshCalendar',
-            timeout: 0,
-            interval: '5m'
-        }
-    ],
-    errorHandler: (error) => {
-        console.error('Bree job error:', error);
-        process.exit(1);
-    }
+import { Auth } from './src/auth.js';
+import { loadConfig } from './src/config.js';
+import { openDatabase } from './src/db.js';
+import { IgdbClient } from './src/igdb.js';
+import { Notifier, createTransport } from './src/notify.js';
+import { createApp } from './src/server.js';
+import { Sync } from './src/sync.js';
+
+const config = loadConfig();
+const store = openDatabase(config.dataDir);
+const igdb = new IgdbClient(config.igdb);
+const auth = new Auth({ config, store });
+const sync = new Sync({ store, igdb, config });
+const notifier = new Notifier({ store, transport: createTransport(config.smtp), sync, config });
+
+if (!auth.configured) console.warn('SSO is not configured (OAUTH_URL / OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET); login is disabled');
+else auth.provider().catch(error => console.warn('SSO discovery failed; retrying on next login:', error.message));
+
+const server = createApp({ config, store, igdb, auth }).listen(config.port, () => {
+    console.log(`Listening on :${config.port} as ${config.baseUrl}`);
 });
+sync.start();
+notifier.start();
 
-bree.start();
-
-// host simple http server that serves releases.ics
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
-
-const PORT = process.env.PORT || 3000;
-
-const server = http.createServer((req, res) => {
-    if (req.url !== '/releases.ics') {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('Not found');
-        return;
-    }
-
-    const filePath = path.join(process.cwd(), 'releases.ics');
-    fs.stat(filePath, (err, stats) => {
-        if (err || !stats.isFile()) {
-            res.writeHead(404, { 'Content-Type': 'text/plain' });
-            res.end('Not found');
-            return;
-        }
-        res.writeHead(200, {
-            'Content-Type': 'text/calendar; charset=utf-8',
-            'Content-Length': stats.size,
-            'Cache-Control': 'public, max-age=60'
-        });
-        const stream = fs.createReadStream(filePath);
-        stream.pipe(res);
-        stream.on('error', () => {
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Server error');
-        });
+function shutdown() {
+    sync.stop();
+    notifier.stop();
+    server.close(() => {
+        store.close();
+        process.exit(0);
     });
-});
-
-server.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-});
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

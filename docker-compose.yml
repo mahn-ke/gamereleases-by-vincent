@@ -4,18 +4,30 @@ version: "3.8"
 services:
   app:
     image: ghcr.io/mahn-ke/gamereleases-by-vincent:latest@sha256:45500b12633c186d4c5e0f6d2b626e95cb436b98f0d684941937c46e85fdf56d
-    restart: on-failure:5
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      - RELEASES_COOKIE=${RELEASES_COOKIE}
-      - RELEASES_EMAIL=${RELEASES_EMAIL}
-      - RELEASES_PASSWORD=${RELEASES_PASSWORD}
+      - APP_BASE_URL=https://gamereleases.by.vincent.mahn.ke
       - DATA_DIR=/app/data
+      # SSO client managed by mahn-ke/repos (oauth_clients)
+      - OAUTH_URL=${OAUTH_URL}
+      - OAUTH_NAME=${OAUTH_NAME}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+      # IGDB credentials from a Twitch developer application (https://dev.twitch.tv/console/apps)
+      - TWITCH_CLIENT_ID=${TWITCH_CLIENT_ID}
+      - TWITCH_CLIENT_SECRET=${TWITCH_CLIENT_SECRET}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_SECURITY=${SMTP_SECURITY}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM=${SMTP_FROM}
     volumes:
       - data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/releases.ics"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 5
