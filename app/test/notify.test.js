@@ -83,3 +83,14 @@ test('mail HTML escapes game names', () => {
     assert.match(mail.html, /&lt;script&gt;x&lt;\/script&gt;/);
     assert.match(mail.html, /href="https:\/\/x\.test\/\?a=1&amp;b=&quot;2&quot;"/);
 });
+
+test('users who switched release mails off are skipped', async () => {
+    const { store, alice, bob } = seededStore();
+    store.setReminder(alice.id, 1, true);
+    store.setReminder(bob.id, 2, true);
+    store.setEmailNotifications(alice.id, false);
+    const transport = fakeTransport();
+    const notifier = new Notifier({ store, transport, config: testConfig(), log: quiet, clock: midnightBeforeNov14 });
+    assert.deepEqual(await notifier.run(), { sent: 1, failed: 0 });
+    assert.deepEqual(transport.sent.map(mail => mail.to), ['bob@example.test']);
+});

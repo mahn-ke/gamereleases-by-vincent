@@ -11,6 +11,9 @@ create table if not exists users (
     email text,
     name text,
     ics_token text not null,
+    email_notifications integer not null default 1,
+    -- when the email was last taken from an SSO ID token
+    email_synced_at integer,
     created_at integer not null
 );
 create table if not exists sessions (
@@ -23,6 +26,7 @@ create table if not exists login_states (
     state text primary key,
     verifier text not null,
     return_to text,
+    silent integer not null default 0,
     created_at integer not null
 );
 create table if not exists games (
@@ -82,6 +86,14 @@ export function openDatabase(dataDir) {
     const releaseColumns = db.prepare('pragma table_info(releases)').all().map(column => column.name);
     if (releaseColumns.length && !releaseColumns.includes('precision')) db.exec('drop table releases');
     db.exec(SCHEMA);
+    // Columns added after the first release; existing rows keep their data
+    const addColumn = (table, column, definition) => {
+        const columns = db.prepare(`pragma table_info(${table})`).all().map(c => c.name);
+        if (!columns.includes(column)) db.exec(`alter table ${table} add column ${column} ${definition}`);
+    };
+    addColumn('users', 'email_notifications', 'integer not null default 1');
+    addColumn('users', 'email_synced_at', 'integer');
+    addColumn('login_states', 'silent', 'integer not null default 0');
     return new Store(db);
 }
 
@@ -126,21 +138,25 @@ export class Store {
     upsertUser({ sub, username, email, name }) {
         const existing = this.db.prepare('select * from users where sub = ?').get(sub);
         if (existing) {
-            this.db.prepare('update users set email = ?, name = ? where id = ?').run(email ?? null, name ?? null, existing.id);
-            return { ...existing, email: email ?? null, name: name ?? null };
+            this.db.prepare('update users set email = ?, name = ?, email_synced_at = ? where id = ?').run(email ?? null, name ?? null, now(), existing.id);
+            return this.db.prepare('select * from users where id = ?').get(existing.id);
         }
         // Usernames appear in calendar URLs, so they stay stable once assigned
         let candidate = username;
         for (let i = 2; this.db.prepare('select 1 from users where username = ?').get(candidate); i++) {
             candidate = `${username}-${i}`;
         }
-        const result = this.db.prepare('insert into users (sub, username, email, name, ics_token, created_at) values (?, ?, ?, ?, ?, ?)')
-            .run(sub, candidate, email ?? null, name ?? null, newToken(), now());
+        const result = this.db.prepare('insert into users (sub, username, email, name, ics_token, email_synced_at, created_at) values (?, ?, ?, ?, ?, ?, ?)')
+            .run(sub, candidate, email ?? null, name ?? null, newToken(), now(), now());
         return this.db.prepare('select * from users where id = ?').get(result.lastInsertRowid);
     }
 
     getUserByUsername(username) {
         return this.db.prepare('select * from users where username = ?').get(username) ?? null;
+    }
+
+    setEmailNotifications(userId, enabled) {
+        this.db.prepare('update users set email_notifications = ? where id = ?').run(enabled ? 1 : 0, userId);
     }
 
     regenerateIcsToken(userId) {
@@ -167,9 +183,10 @@ export class Store {
         this.db.prepare('delete from sessions where id = ?').run(sessionId);
     }
 
-    saveLoginState(state, verifier, returnTo) {
+    saveLoginState(state, verifier, returnTo, silent = false) {
         this.db.prepare('delete from login_states where created_at < ?').run(now() - 600);
-        this.db.prepare('insert into login_states (state, verifier, return_to, created_at) values (?, ?, ?, ?)').run(state, verifier, returnTo ?? null, now());
+        this.db.prepare('insert into login_states (state, verifier, return_to, silent, created_at) values (?, ?, ?, ?, ?)')
+            .run(state, verifier, returnTo ?? null, silent ? 1 : 0, now());
     }
 
     takeLoginState(state) {
@@ -313,7 +330,7 @@ export class Store {
                 g.id as game_id, g.name, g.url, group_concat(r.platform, char(31)) as platforms
             from reminders m join users u on u.id = m.user_id join releases r on r.game_id = m.game_id and r.day = ? and r.precision = 'day'
             join games g on g.id = m.game_id
-            where u.email is not null and u.email != ''
+            where u.email is not null and u.email != '' and u.email_notifications = 1
               and not exists (select 1 from notifications n where n.user_id = u.id and n.game_id = g.id and n.day = ?)
             group by u.id, g.id order by u.id, g.name`).all(day, day));
         const byUser = new Map();

@@ -207,7 +207,29 @@ export function searchPage(ctx, results, { q, error }) {
     return layout(ctx, content);
 }
 
-export function remindersPage(ctx, reminders, { icsUrl }) {
+const syncedFormat = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+function mailPanel(ctx, accountUrl) {
+    const user = ctx.user;
+    const enabled = user.email_notifications !== 0;
+    const synced = user.email_synced_at ? syncedFormat.format(new Date(user.email_synced_at * 1000)) : null;
+    return html`<section class="panel">
+        <h2>Release mails</h2>
+        <form method="post" action="/reminders/notifications" class="mail-form">
+            <label class="toggle"><input type="checkbox" name="enabled" value="1"${enabled ? raw(' checked') : ''}>
+                <span>Email me at 00:00 (Europe/Berlin) the day before a tracked game releases</span></label>
+            <noscript><button type="submit" class="secondary">Save</button></noscript>
+        </form>
+        <p class="muted">${enabled ? 'Sending to' : 'Mails are off. Address on file:'} <strong>${user.email || 'no address on your SSO account'}</strong>${synced ? html` <span class="synced">(from SSO, ${synced})</span>` : ''}</p>
+        ${accountUrl ? html`<p class="sso-links">
+            <a class="button secondary" href="${accountUrl}">Change email in SSO</a>
+            <a class="button secondary" href="/auth/refresh?return=%2Freminders">Refresh from SSO</a>
+        </p>
+        <p class="muted small">The address comes from your SSO account. After changing it there, use the account page's back link or "Refresh from SSO" so this app picks it up. If SSO asks you to verify the new address first, refresh again after confirming it.</p>` : ''}
+    </section>`;
+}
+
+export function remindersPage(ctx, reminders, { icsUrl, accountUrl = null }) {
     const upcoming = reminders.filter(g => g.day);
     const undated = reminders.filter(g => !g.day && !g.past_day);
     const released = reminders.filter(g => !g.day && g.past_day).map(g => ({ ...g, day: g.past_day, precision: 'day' }));
@@ -224,8 +246,8 @@ export function remindersPage(ctx, reminders, { icsUrl }) {
                 <button type="submit" class="secondary">Generate a new address</button>
                 <span>The current address stops working immediately.</span>
             </form>
-            <p class="muted">Emails go to <strong>${ctx.user.email || 'no address on your SSO account'}</strong> at 00:00 (Europe/Berlin) the day before a tracked game releases.</p>
         </section>
+        ${mailPanel(ctx, accountUrl)}
         ${!reminders.length ? html`<p class="empty">No reminders yet. Click the ${icon.bell} on any game to add it.</p>` : ''}
         ${upcoming.length ? html`<section class="day"><h2><span>Upcoming</span><small class="count">${upcoming.length}</small></h2>${grid(upcoming, ctx, { showDay: true })}</section>` : ''}
         ${undated.length ? html`<section class="day"><h2><span>No date yet</span><small class="count">${undated.length}</small></h2>${grid(undated, ctx, { showDay: true })}</section>` : ''}
