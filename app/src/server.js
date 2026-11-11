@@ -94,8 +94,9 @@ export function createApp({ config, store, igdb, auth, log = console }) {
     app.get('/', (req, res) => {
         const ctx = context(req, { view: 'calendar' });
         if (isDay(req.query.from)) ctx.from = req.query.from;
-        const releases = store.releasesBetween(ctx.from, addDays(ctx.from, CALENDAR_DAYS - 1), { userId: req.user?.id ?? null, platforms: ctx.platforms });
-        res.send(calendarPage(ctx, releases, { days: CALENDAR_DAYS }));
+        const days = Math.min(62, Math.max(1, Number.parseInt(req.query.days, 10) || CALENDAR_DAYS));
+        const releases = store.releasesBetween(ctx.from, addDays(ctx.from, days - 1), { userId: req.user?.id ?? null, platforms: ctx.platforms });
+        res.send(calendarPage(ctx, releases, { days, showAll: req.query.all === '1' }));
     });
 
     app.get('/hot', (req, res) => {
@@ -124,7 +125,7 @@ export function createApp({ config, store, igdb, auth, log = console }) {
                 ids = store.searchLocal(q);
             }
         }
-        res.send(searchPage(ctx, store.gamesByIds(ids, req.user?.id ?? null), { q, error }));
+        res.send(searchPage(ctx, store.gamesByIds(ids, req.user?.id ?? null, ctx.today), { q, error }));
     });
 
     app.get('/reminders', (req, res) => {

@@ -62,6 +62,31 @@ export function nextMidnightInZone(now, timeZone) {
     return startOfDayInZone(addDays(dayInZone(now, timeZone), 1), timeZone);
 }
 
+export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Tentative releases sit on the last day of their period, like releases.com:
+// "Nov 2026" after Nov 30, "Q4 2026" and "2026" after Dec 31
+export function lastDayOfMonth(year, month) {
+    return new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
+}
+
+export function estimateAnchor(precision, year, period) {
+    if (precision === 'month') return lastDayOfMonth(year, period);
+    if (precision === 'quarter') return lastDayOfMonth(year, period * 3);
+    if (precision === 'year') return `${year}-12-31`;
+    throw new Error(`Unknown precision ${precision}`);
+}
+
+export function estimateLabel(precision, day, { withYear = false } = {}) {
+    const year = day.slice(0, 4);
+    const month = Number(day.slice(5, 7));
+    const suffix = withYear ? ` ${year}` : '';
+    if (precision === 'month') return `Est. ${MONTHS[month - 1]}${suffix}`;
+    if (precision === 'quarter') return `Est. Q${Math.ceil(month / 3)}${suffix}`;
+    if (precision === 'year') return `Est. ${year}`;
+    return null;
+}
+
 const longDay = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'long', month: 'short', day: 'numeric' });
 const shortDay = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' });
 

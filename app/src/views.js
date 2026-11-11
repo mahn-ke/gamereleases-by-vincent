@@ -1,6 +1,6 @@
 import { html, raw, toString } from './html.js';
 import { coverUrl } from './igdb.js';
-import { addDays, dayLabel, shortDayLabel } from './time.js';
+import { addDays, dayLabel, estimateLabel, shortDayLabel } from './time.js';
 
 const icon = {
     bell: raw('<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 0 0-5.5-6.84V3.5a1.5 1.5 0 0 0-3 0v.66A7 7 0 0 0 5 11v5l-2 2v1h18v-1Z"/></svg>'),
@@ -16,6 +16,9 @@ const icon = {
 };
 
 const ANTICIPATED_HYPES = 5;
+// Year estimates can hold over a thousand games; show the most anticipated first
+const TENTATIVE_PREVIEW = 24;
+const PRECISION_ORDER = ['month', 'quarter', 'year'];
 
 function query(params) {
     const search = new URLSearchParams();
@@ -38,17 +41,20 @@ function card(game, ctx, { wide = false, showDay = false } = {}) {
     const cover = coverUrl(game.cover_image_id);
     const art = wide ? coverUrl(game.art_image_id, 't_screenshot_big') : null;
     const anticipated = game.hypes >= ANTICIPATED_HYPES;
-    const dayText = game.day ? (showDay ? `${dayLabel(game.day, ctx.today)}` : null) : (showDay ? 'No date yet' : null);
+    const tentative = game.day && game.precision && game.precision !== 'day';
+    const dayText = tentative ? estimateLabel(game.precision, game.day, { withYear: true })
+        : game.day ? (showDay ? dayLabel(game.day, ctx.today) : null) : (showDay ? 'No date yet' : null);
     return html`<article class="card${wide ? ' wide' : ''}">
         ${art ? html`<img class="art" src="${art}" alt="" loading="lazy">` : ''}
         <a class="cover" href="${game.url || '#'}" target="_blank" rel="noopener">
             ${cover ? html`<img src="${cover}" alt="${game.name} cover" loading="lazy">` : html`<span class="noimg">${icon.pad}<span>No image</span></span>`}
             ${anticipated ? html`<span class="badge">${icon.flame}Anticipated</span>` : ''}
+            ${tentative ? html`<span class="badge est" title="Tentative release date">${estimateLabel(game.precision, game.day)}</span>` : ''}
         </a>
         <div class="meta">
             <h3 title="${game.name}">${game.name}</h3>
             <p class="platforms">${icon.pad}<span>${game.platforms.join(' / ') || 'Platforms TBA'}</span></p>
-            ${dayText ? html`<p class="when">${icon.calendar}<span>${dayText}</span></p>` : ''}
+            ${dayText ? html`<p class="when${tentative ? ' est' : ''}"${tentative ? raw(' title="Tentative release date"') : ''}>${icon.calendar}<span>${dayText}</span></p>` : ''}
             <div class="actions">
                 ${game.video_id ? html`<a class="play" href="https://www.youtube.com/watch?v=${game.video_id}" target="_blank" rel="noopener" title="Watch trailer" aria-label="Watch the ${game.name} trailer">${icon.play}</a>` : html`<span class="play disabled" aria-hidden="true">${icon.play}</span>`}
                 ${bell(game, ctx)}
@@ -59,7 +65,7 @@ function card(game, ctx, { wide = false, showDay = false } = {}) {
 
 function grid(games, ctx, options = {}) {
     // The two most anticipated releases of a day get the wide treatment, like the featured row
-    const featured = options.feature ? new Set(games.filter(g => g.hypes >= ANTICIPATED_HYPES && g.art_image_id).slice(0, 2).map(g => g.id)) : new Set();
+    const featured = options.feature ? new Set(games.filter(g => g.hypes >= ANTICIPATED_HYPES && g.art_image_id && (g.precision ?? 'day') === 'day').slice(0, 2).map(g => g.id)) : new Set();
     return html`<div class="grid">${games.map(game => card(game, ctx, { wide: featured.has(game.id), showDay: options.showDay }))}</div>`;
 }
 
@@ -146,23 +152,38 @@ export function layout(ctx, content) {
 </html>`);
 }
 
-export function calendarPage(ctx, releases, { days }) {
+function tentativeGroup(day, precision, games, ctx, { days, showAll }) {
+    const shown = showAll ? games : games.slice(0, TENTATIVE_PREVIEW);
+    return html`<div class="tentative">
+        <h3><span>Tentative dates</span><span class="chip">${estimateLabel(precision, day)}</span><small class="count">${games.length} ${games.length === 1 ? 'game' : 'games'}</small></h3>
+        ${grid(shown, ctx)}
+        ${shown.length < games.length ? html`<a class="more" href="/${query({ from: day, days: 1, all: 1, platform: ctx.platforms })}">Show all ${games.length} · ${estimateLabel(precision, day, { withYear: true })}</a>` : ''}
+    </div>`;
+}
+
+export function calendarPage(ctx, releases, { days, showAll = false }) {
     const byDay = new Map();
     for (const game of releases) {
-        if (!byDay.has(game.day)) byDay.set(game.day, []);
-        byDay.get(game.day).push(game);
+        if (!byDay.has(game.day)) byDay.set(game.day, { exact: [], tentative: new Map() });
+        const entry = byDay.get(game.day);
+        if ((game.precision ?? 'day') === 'day') entry.exact.push(game);
+        else {
+            if (!entry.tentative.has(game.precision)) entry.tentative.set(game.precision, []);
+            entry.tentative.get(game.precision).push(game);
+        }
     }
     const later = addDays(ctx.from, days);
     const earlier = addDays(ctx.from, -days);
     const content = html`
         ${byDay.size === 0 ? html`<p class="empty">No releases with a known date between ${shortDayLabel(ctx.from)} and ${shortDayLabel(addDays(later, -1))}${ctx.syncNote ? html`. ${ctx.syncNote}` : ''}.</p>` : ''}
-        ${[...byDay].map(([day, games]) => html`<section class="day">
-            <h2><span>${dayLabel(day, ctx.today)}</span>${day !== ctx.today && day !== addDays(ctx.today, 1) ? '' : html`<small>${shortDayLabel(day)}</small>`}<small class="count">${games.length} ${games.length === 1 ? 'game' : 'games'}</small></h2>
-            ${grid(games, ctx, { feature: true })}
+        ${[...byDay].map(([day, { exact, tentative }]) => html`<section class="day">
+            <h2><span>${dayLabel(day, ctx.today)}</span>${day !== ctx.today && day !== addDays(ctx.today, 1) ? '' : html`<small>${shortDayLabel(day)}</small>`}${exact.length ? html`<small class="count">${exact.length} ${exact.length === 1 ? 'game' : 'games'}</small>` : ''}</h2>
+            ${exact.length ? grid(exact, ctx, { feature: true }) : ''}
+            ${PRECISION_ORDER.filter(p => tentative.has(p)).map(p => tentativeGroup(day, p, tentative.get(p), ctx, { days, showAll }))}
         </section>`)}
         <nav class="pager">
-            <a href="/${query({ from: earlier, platform: ctx.platforms })}">← ${shortDayLabel(earlier)}</a>
-            <a href="/${query({ from: later, platform: ctx.platforms })}">${shortDayLabel(later)} →</a>
+            <a href="/${query({ from: earlier, days: days === 14 ? null : days, platform: ctx.platforms })}">← ${shortDayLabel(earlier)}</a>
+            <a href="/${query({ from: later, days: days === 14 ? null : days, platform: ctx.platforms })}">${shortDayLabel(later)} →</a>
         </nav>`;
     return layout(ctx, content);
 }

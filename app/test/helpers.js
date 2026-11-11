@@ -17,6 +17,11 @@ export function seededStore() {
             releases: [{ day: '2026-11-14', platform: 'Switch' }, { day: '2026-12-01', platform: 'PC' }] },
         { id: 3, name: '<script>alert(1)</script> Remastered', hypes: 0, releases: [{ day: '2026-11-15', platform: 'Switch' }] },
         { id: 4, name: 'Unannounced Sequel', hypes: 2, releases: [] },
+        { id: 5, name: 'Starfall Saga', hypes: 50, coverImageId: 'co5', artImageId: 'sc5',
+            releases: [{ day: '2026-11-30', platform: 'PC', precision: 'month' }, { day: '2026-11-30', platform: 'PlayStation 5', precision: 'month' }] },
+        { id: 6, name: 'Harbor Lights', hypes: 1, releases: [{ day: '2026-12-31', platform: 'Switch', precision: 'quarter' }] },
+        { id: 7, name: 'Someday Odyssey', hypes: 9, releases: [{ day: '2026-12-31', platform: 'PC', precision: 'year' }] },
+        { id: 8, name: 'Year End Exact', hypes: 0, releases: [{ day: '2026-12-31', platform: 'PC' }] },
     ]);
     const alice = store.upsertUser({ sub: 'sub-alice', username: 'alice', email: 'alice@example.test', name: 'Alice Example' });
     const bob = store.upsertUser({ sub: 'sub-bob', username: 'bob', email: 'bob@example.test', name: 'Bob Example' });

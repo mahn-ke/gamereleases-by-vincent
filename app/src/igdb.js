@@ -1,5 +1,5 @@
 // IGDB (https://api-docs.igdb.com) via Twitch client credentials.
-import { utcDay } from './time.js';
+import { MONTHS, estimateAnchor, utcDay } from './time.js';
 
 const TOKEN_URL = 'https://id.twitch.tv/oauth2/token';
 const API_URL = 'https://api.igdb.com/v4';
@@ -30,12 +30,35 @@ export function coverUrl(imageId, size = 't_cover_big') {
     return imageId ? `https://images.igdb.com/igdb/image/upload/${size}/${imageId}.jpg` : null;
 }
 
-// Only releases with a known day appear on the calendar. The precision field was
-// renamed from `category` to `date_format`; `human` is the fallback for either.
-function isExactDay(release) {
-    const precision = release.date_format ?? release.category;
-    if (typeof precision === 'number') return precision === 0;
-    return typeof release.human === 'string' && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(release.human);
+// Date precision: IGDB renamed `category` to `date_format` (0 day, 1 month, 2 year,
+// 3-6 quarters 1-4, 7 TBD). The `human` text ("Nov 14, 2026", "Nov 2026",
+// "Q4 2026", "2026", "TBD") is the fallback and the source of the period.
+// Returns { day, precision } with tentative dates anchored to their period's end.
+export function releaseDay(release) {
+    const code = release.date_format ?? release.category;
+    const human = typeof release.human === 'string' ? release.human.trim() : '';
+    const fallbackDate = typeof release.date === 'number' ? new Date(release.date * 1000) : null;
+    const year = Number(release.y) || fallbackDate?.getUTCFullYear();
+    let match;
+
+    if (code === 0 || (code === undefined && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(human))) {
+        return fallbackDate ? { day: utcDay(release.date), precision: 'day' } : null;
+    }
+    if ((match = /^([A-Z][a-z]{2}) (\d{4})$/.exec(human)) && MONTHS.includes(match[1]) && (code === undefined || code === 1)) {
+        return { day: estimateAnchor('month', Number(match[2]), MONTHS.indexOf(match[1]) + 1), precision: 'month' };
+    }
+    if ((match = /^Q([1-4]) (\d{4})$/.exec(human)) && (code === undefined || (code >= 3 && code <= 6))) {
+        return { day: estimateAnchor('quarter', Number(match[2]), Number(match[1])), precision: 'quarter' };
+    }
+    if ((match = /^(\d{4})$/.exec(human)) && (code === undefined || code === 2)) {
+        return { day: estimateAnchor('year', Number(match[1])), precision: 'year' };
+    }
+    if (!year) return null;
+    // `human` missing or in an unexpected format: fall back to the numeric fields
+    if (code === 1) return { day: estimateAnchor('month', year, Number(release.m) || fallbackDate.getUTCMonth() + 1), precision: 'month' };
+    if (code >= 3 && code <= 6) return { day: estimateAnchor('quarter', year, code - 2), precision: 'quarter' };
+    if (code === 2) return { day: estimateAnchor('year', year), precision: 'year' };
+    return null;
 }
 
 function platformName(platform) {
@@ -47,14 +70,14 @@ export function mapGame(raw) {
     const releases = [];
     const seen = new Set();
     for (const release of raw.release_dates ?? []) {
-        if (typeof release !== 'object' || typeof release.date !== 'number' || !isExactDay(release)) continue;
+        if (typeof release !== 'object' || release === null) continue;
         const platform = platformName(release.platform);
-        if (!platform) continue;
-        const day = utcDay(release.date);
-        const key = `${day}|${platform}`;
+        const when = platform ? releaseDay(release) : null;
+        if (!when) continue;
+        const key = `${when.day}|${platform}|${when.precision}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        releases.push({ day, platform });
+        releases.push({ day: when.day, platform, precision: when.precision });
     }
     return {
         id: raw.id,
