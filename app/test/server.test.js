@@ -234,3 +234,17 @@ test('an old releases cache without precision is rebuilt', async () => {
         rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test('reminders page separates upcoming, undated and released games', async (t) => {
+    const ctx = await startServer();
+    t.after(() => ctx.server.close());
+    ctx.store.upsertGames([{ id: 60, name: 'Long Released', hypes: 0, releases: [{ day: '2020-01-10', platform: 'PC' }] }]);
+    for (const id of [1, 4, 60]) ctx.store.setReminder(ctx.alice.id, id, true);
+    const page = await (await ctx.request('/reminders', { cookie: ctx.session(ctx.alice) })).text();
+    const section = name => page.slice(page.indexOf(`<span>${name}</span>`), page.indexOf('</section>', page.indexOf(`<span>${name}</span>`)));
+    assert.match(section('Upcoming'), /Ova Magica/);
+    assert.doesNotMatch(section('Upcoming'), /Long Released/);
+    assert.match(section('No date yet'), /Unannounced Sequel/);
+    assert.match(section('Released'), /Long Released/);
+    assert.match(section('Released'), /Friday, Jan 10/);
+});

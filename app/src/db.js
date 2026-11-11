@@ -248,7 +248,8 @@ export class Store {
             from reminders m join games g on g.id = m.game_id
             where m.user_id = ?
             order by day is null, day asc, past_day desc, g.name asc`).all(today, today, userId);
-        return rows.map(row => this.withNextRelease(row, row.day ?? row.past_day));
+        // `day` stays the next upcoming release; released games keep it null and show `past_day`
+        return rows.map(row => ({ ...this.withNextRelease(row, row.day ?? row.past_day), day: row.day, past_day: row.past_day }));
     }
 
     // Adds the precision and platforms of a game's release on `day` (exact before estimates)

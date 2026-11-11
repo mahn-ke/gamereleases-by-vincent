@@ -210,7 +210,7 @@ export function searchPage(ctx, results, { q, error }) {
 export function remindersPage(ctx, reminders, { icsUrl }) {
     const upcoming = reminders.filter(g => g.day);
     const undated = reminders.filter(g => !g.day && !g.past_day);
-    const released = reminders.filter(g => !g.day && g.past_day).map(g => ({ ...g, day: g.past_day }));
+    const released = reminders.filter(g => !g.day && g.past_day).map(g => ({ ...g, day: g.past_day, precision: 'day' }));
     const content = html`
         <section class="panel">
             <h2>Calendar subscription</h2>
