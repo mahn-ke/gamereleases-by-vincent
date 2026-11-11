@@ -46,7 +46,7 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('change', (event) => {
-    if (event.target.matches('.filter-form input[type=checkbox], .datepick input[type=date]')) {
+    if (event.target.matches('.filter-form input[type=checkbox], .datepick input[type=date], .mail-form input[type=checkbox]')) {
         event.target.form.submit();
     }
 });

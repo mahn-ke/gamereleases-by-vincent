@@ -152,3 +152,11 @@ button:hover, .button:hover { filter: brightness(1.1); }
     .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px; }
     .card.wide { grid-column: span 2; }
 }
+
+.toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; margin: 6px 0 10px; }
+.toggle input { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; }
+.mail-form { margin: 0; }
+.synced { color: var(--muted); font-size: 13px; }
+.sso-links { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 6px; }
+.button.secondary { background: var(--button); }
+.muted.small { font-size: 13px; }

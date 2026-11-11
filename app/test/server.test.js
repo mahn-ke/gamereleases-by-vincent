@@ -117,6 +117,7 @@ test('login redirects to the provider and the callback creates a session', async
     const auth = {
         configured: true,
         async loginUrl(returnTo) { return `https://sso.example.test/auth?return=${encodeURIComponent(returnTo)}`; },
+        accountUrl() { return 'https://sso.example.test/account/'; },
         async complete(url) {
             completedWith = url;
             return { user: ctx.alice, idToken: 'id', returnTo: '/hot' };
@@ -247,4 +248,46 @@ test('reminders page separates upcoming, undated and released games', async (t) 
     assert.match(section('No date yet'), /Unannounced Sequel/);
     assert.match(section('Released'), /Long Released/);
     assert.match(section('Released'), /Friday, Jan 10/);
+});
+
+test('release mails can be switched off and the SSO account is linked', async (t) => {
+    const ctx = await startServer({ auth: { configured: true, accountUrl: () => 'https://sso.example.test/account/?referrer=gr' } });
+    t.after(() => ctx.server.close());
+    const cookie = ctx.session(ctx.alice);
+    let page = await (await ctx.request('/reminders', { cookie })).text();
+    assert.match(page, /name="enabled" value="1" checked/);
+    assert.match(page, /Sending to <strong>alice@example\.test<\/strong>/);
+    assert.match(page, /href="https:\/\/sso\.example\.test\/account\/\?referrer=gr">Change email in SSO/);
+    assert.match(page, /href="\/auth\/refresh\?return=%2Freminders">Refresh from SSO/);
+
+    const form = body => fetch(`http://127.0.0.1:${ctx.server.address().port}/reminders/notifications`, {
+        method: 'POST', redirect: 'manual', body, headers: { cookie, origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' } });
+    assert.equal((await ctx.request('/reminders/notifications', { method: 'POST', cookie })).status, 403);
+    assert.equal((await form('')).status, 303);
+    page = await (await ctx.request('/reminders', { cookie })).text();
+    assert.doesNotMatch(page, /name="enabled" value="1" checked/);
+    assert.match(page, /Mails are off/);
+    assert.equal(ctx.store.getUserByUsername('alice').email_notifications, 0);
+    await form('enabled=1');
+    assert.equal(ctx.store.getUserByUsername('alice').email_notifications, 1);
+});
+
+test('refresh starts a silent SSO request and falls back to a regular login', async (t) => {
+    const calls = [];
+    const auth = {
+        configured: true,
+        accountUrl: () => 'https://sso.example.test/account/',
+        async loginUrl(returnTo, options = {}) { calls.push([returnTo, options.silent === true]); return 'https://sso.example.test/auth'; },
+        async complete() { return { interactive: true, returnTo: '/reminders' }; },
+    };
+    const ctx = await startServer({ auth });
+    t.after(() => ctx.server.close());
+    const refresh = await ctx.request('/auth/refresh?return=%2Freminders');
+    assert.equal(refresh.status, 302);
+    assert.deepEqual(calls, [['/reminders', true]]);
+    assert.equal((await ctx.request('/auth/refresh?return=%2F%2Fevil.test')).status, 302);
+    assert.deepEqual(calls[1], ['/', true]);
+    const callback = await ctx.request('/auth/callback?error=login_required&state=x');
+    assert.equal(callback.status, 302);
+    assert.equal(callback.headers.get('location'), '/login?return=%2Freminders');
 });

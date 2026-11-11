@@ -48,6 +48,7 @@ export function createApp({ config, store, igdb, auth, log = console }) {
     });
     app.use('/static', express.static(PUBLIC_DIR, { maxAge: '1h' }));
     app.use(express.json({ limit: '4kb' }));
+    app.use(express.urlencoded({ extended: false, limit: '2kb' }));
 
     app.use((req, res, next) => {
         req.sessionId = parseCookies(req.headers.cookie)[SESSION_COOKIE] || null;
@@ -133,7 +134,14 @@ export function createApp({ config, store, igdb, auth, log = console }) {
         const ctx = context(req, { view: 'reminders', title: 'My reminders', showFilters: false, from: null });
         res.send(remindersPage(ctx, store.userReminders(req.user.id, ctx.today), {
             icsUrl: `${config.baseUrl}/${encodeURIComponent(req.user.username)}/${req.user.ics_token}.ics`,
+            accountUrl: auth.configured ? auth.accountUrl('/reminders') : null,
         }));
+    });
+
+    app.post('/reminders/notifications', (req, res) => {
+        if (!requireUser(req, res)) return;
+        store.setEmailNotifications(req.user.id, req.body?.enabled === '1');
+        res.redirect(303, '/reminders');
     });
 
     app.post('/reminders/ics/regenerate', (req, res) => {
@@ -160,9 +168,23 @@ export function createApp({ config, store, igdb, auth, log = console }) {
         }
     });
 
+    // Re-reads the SSO profile (e.g. a changed email) without a login screen
+    app.get('/auth/refresh', async (req, res, next) => {
+        const returnTo = safeReturnPath(req.query.return);
+        if (!auth.configured) return res.redirect(302, returnTo);
+        try {
+            res.redirect(302, await auth.loginUrl(returnTo, { silent: true }));
+        } catch (error) {
+            next(error);
+        }
+    });
+
     app.get('/auth/callback', async (req, res) => {
         try {
-            const { user, idToken, returnTo } = await auth.complete(new URL(req.originalUrl, config.baseUrl));
+            const result = await auth.complete(new URL(req.originalUrl, config.baseUrl));
+            if (result.interactive) return res.redirect(302, `/login?return=${encodeURIComponent(safeReturnPath(result.returnTo))}`);
+            const { user, idToken, returnTo } = result;
+            if (req.sessionId) store.deleteSession(req.sessionId);
             const sessionId = store.createSession(user.id, idToken, SESSION_TTL_SECONDS);
             res.cookie(SESSION_COOKIE, sessionId, { httpOnly: true, secure: secureCookies, sameSite: 'lax', path: '/', maxAge: SESSION_TTL_SECONDS * 1000 });
             res.redirect(302, safeReturnPath(returnTo));

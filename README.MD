@@ -5,7 +5,8 @@ covers, platforms, trailers and a reminder bell per game.
 
 - **Browse** upcoming releases by day (`/`), the most anticipated ones (`/hot`), or search all of IGDB (`/search`). Filter by platform.
 - **Remind**: log in with the SSO account (sso.by.vincent.mahn.ke) and click a game's bell. The number next to it counts everyone on this server who tracks it.
-- **Email**: at 00:00 Europe/Berlin on the day before a tracked game releases, one mail per user goes to the address on their SSO account. Each game and day is mailed once; runs missed during downtime are caught up the same day.
+- **Email**: at 00:00 Europe/Berlin on the day before a tracked game releases, one mail per user goes to the address on their SSO account. Each game and day is mailed once; runs missed during downtime are caught up the same day. Users can switch these mails off on `/reminders`.
+- **Changing the email**: the address belongs to the SSO account, so `/reminders` links to the Keycloak account console. Keycloak doesn't notify apps about profile changes, so the app pulls them: on every login, and silently via `/auth/refresh` (an OIDC request with `prompt=none` that returns immediately while the SSO session is active). The account console's "Back to …" link and the "Refresh from SSO" button both go through it.
 - **Calendar feed**: `/reminders` shows a personal `https://gamereleases.by.vincent.mahn.ke/<username>/<secret>.ics` subscription. It needs no login, tells clients to refresh every 6 hours, and can be regenerated at any time, which immediately disables the old address.
 
 ## Data
