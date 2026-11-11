@@ -178,3 +178,59 @@ test('auth helpers keep redirects local and usernames URL-safe', () => {
     assert.equal(again.username, 'alice');
     assert.equal(again.email, 'new@example.test');
 });
+
+test('tentative releases follow the end of their period, grouped and labelled', async (t) => {
+    const ctx = await startServer();
+    t.after(() => ctx.server.close());
+    const page = await (await ctx.request('/?from=2026-11-25&days=40')).text();
+    const order = ['Monday, Nov 30', 'Starfall Saga', 'Thursday, Dec 31', 'Year End Exact', 'Est. Q4', 'Harbor Lights', 'Est. 2026', 'Someday Odyssey']
+        .map(text => page.indexOf(text));
+    assert.ok(order.every(i => i >= 0), `missing: ${order}`);
+    assert.deepEqual([...order].sort((a, b) => a - b), order, 'exact first, then quarter, then year');
+    assert.match(page, /Tentative dates<\/span><span class="chip">Est\. Nov<\/span>/);
+    assert.match(page, /class="when est"[^>]*>.*?<span>Est\. Nov 2026<\/span>/s);
+    assert.doesNotMatch(page, /class="card wide"[^>]*>(?:(?!<\/article>).)*Starfall Saga/s, 'tentative games are never featured');
+
+    const hot = await (await ctx.request('/hot')).text();
+    assert.match(hot, /Starfall Saga/);
+
+    const search = ctx.store.gamesByIds([7, 2], null, '2026-11-20');
+    assert.deepEqual(search.map(g => [g.id, g.day, g.precision]), [[7, '2026-12-31', 'year'], [2, '2026-12-01', 'day']]);
+});
+
+test('reminders, ICS and mails treat tentative dates as tentative', async (t) => {
+    const ctx = await startServer();
+    t.after(() => ctx.server.close());
+    ctx.store.setReminder(ctx.alice.id, 5, true);
+    ctx.store.setReminder(ctx.alice.id, 1, true);
+    const cookie = ctx.session(ctx.alice);
+    const reminders = await (await ctx.request('/reminders', { cookie })).text();
+    assert.match(reminders, /Est\. Nov 2026/);
+
+    const token = ctx.store.getUserByUsername('alice').ics_token;
+    const ics = await (await ctx.request(`/alice/${token}.ics`)).text();
+    assert.match(ics, /Ova Magica/);
+    assert.doesNotMatch(ics, /Starfall Saga/);
+    assert.deepEqual(ctx.store.pendingNotifications('2026-11-30'), []);
+});
+
+test('an old releases cache without precision is rebuilt', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const { DatabaseSync } = await import('node:sqlite');
+    const { openDatabase } = await import('../src/db.js');
+    const dir = mkdtempSync(path.join(tmpdir(), 'gamereleases-'));
+    try {
+        const old = new DatabaseSync(path.join(dir, 'gamereleases.sqlite'));
+        old.exec('create table releases (game_id integer not null, day text not null, platform text not null, primary key (game_id, day, platform));');
+        old.exec("insert into releases values (1, '2026-11-14', 'PC')");
+        old.close();
+        const store = openDatabase(dir);
+        store.upsertGames([{ id: 1, name: 'Rebuilt', releases: [{ day: '2026-11-30', platform: 'PC', precision: 'month' }] }]);
+        assert.deepEqual(store.releasesBetween('2026-11-01', '2026-12-01').map(r => [r.name, r.precision]), [['Rebuilt', 'month']]);
+        store.close();
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});

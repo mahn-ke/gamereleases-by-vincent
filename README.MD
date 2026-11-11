@@ -10,7 +10,7 @@ covers, platforms, trailers and a reminder bell per game.
 
 ## Data
 
-Release dates, covers and trailers come from [IGDB](https://api-docs.igdb.com). Releases dated only to a month, quarter or year are not shown on the calendar. Every 6 hours the app syncs games releasing from 14 days ago to 180 days ahead, plus every tracked game. Release days are the UTC calendar days IGDB publishes.
+Release dates, covers and trailers come from [IGDB](https://api-docs.igdb.com). Like on releases.com, releases dated only to a month, quarter or year appear as **tentative dates** after the last day of that period ("Nov 2026" after Nov 30, "Q4 2026" and then "2026" after Dec 31), marked with an "Est." label. Mails and calendar feeds only use exact days; TBD releases are left out. Every 6 hours the app syncs games releasing from 14 days ago to 180 days ahead, plus every tracked game. Release days are the UTC calendar days IGDB publishes.
 
 releases.com is no longer used: it has no API and blocks automated clients with a Cloudflare challenge.
 

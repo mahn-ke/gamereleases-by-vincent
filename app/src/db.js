@@ -38,9 +38,11 @@ create table if not exists games (
 );
 create table if not exists releases (
     game_id integer not null references games(id) on delete cascade,
+    -- exact release day, or the last day of the period for tentative dates
     day text not null,
     platform text not null,
-    primary key (game_id, day, platform)
+    precision text not null default 'day' check (precision in ('day', 'month', 'quarter', 'year')),
+    primary key (game_id, day, platform, precision)
 );
 create index if not exists releases_day on releases(day);
 create table if not exists reminders (
@@ -76,6 +78,9 @@ export function openDatabase(dataDir) {
     }
     const db = new DatabaseSync(file);
     db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 5000;');
+    // Releases are a re-syncable cache: rebuild tables that predate tentative dates
+    const releaseColumns = db.prepare('pragma table_info(releases)').all().map(column => column.name);
+    if (releaseColumns.length && !releaseColumns.includes('precision')) db.exec('drop table releases');
     db.exec(SCHEMA);
     return new Store(db);
 }
@@ -91,6 +96,9 @@ function transaction(db, fn) {
         throw error;
     }
 }
+
+// Order of releases sharing a day: exact first, then month, quarter and year estimates
+const PRECISION_RANK = "case r.precision when 'day' then 0 when 'month' then 1 when 'quarter' then 2 else 3 end";
 
 function withPlatforms(rows) {
     return rows.map(row => ({ ...row, platforms: row.platforms ? row.platforms.split('\u001f') : [] }));
@@ -183,13 +191,13 @@ export class Store {
                 cover_image_id = excluded.cover_image_id, art_image_id = excluded.art_image_id,
                 video_id = excluded.video_id, hypes = excluded.hypes, updated_at = excluded.updated_at`);
         const clear = this.db.prepare('delete from releases where game_id = ?');
-        const insert = this.db.prepare('insert or ignore into releases (game_id, day, platform) values (?, ?, ?)');
+        const insert = this.db.prepare('insert or ignore into releases (game_id, day, platform, precision) values (?, ?, ?, ?)');
         transaction(this.db, () => {
             for (const game of games) {
                 upsert.run(game.id, game.name, game.slug ?? null, game.url ?? null, game.coverImageId ?? null,
                     game.artImageId ?? null, game.videoId ?? null, game.hypes ?? 0, now());
                 clear.run(game.id);
-                for (const release of game.releases) insert.run(game.id, release.day, release.platform);
+                for (const release of game.releases) insert.run(game.id, release.day, release.platform, release.precision ?? 'day');
             }
         });
     }
@@ -200,14 +208,14 @@ export class Store {
 
     // Release cards for a day range, one per game and day, with the viewer's reminder state
     releasesBetween(fromDay, toDay, { userId = null, platforms = [] } = {}) {
-        const platformFilter = platforms.length ? `and r.game_id in (select game_id from releases p where p.day = r.day and p.platform in (${platforms.map(() => '?').join(',')}))` : '';
-        const rows = this.db.prepare(`select r.day, g.*, group_concat(r.platform, char(31)) as platforms,
+        const platformFilter = platforms.length ? `and r.game_id in (select game_id from releases p where p.day = r.day and p.precision = r.precision and p.platform in (${platforms.map(() => '?').join(',')}))` : '';
+        const rows = this.db.prepare(`select r.day, r.precision, g.*, group_concat(r.platform, char(31)) as platforms,
                 (select count(*) from reminders m where m.game_id = g.id) as reminder_count,
                 exists(select 1 from reminders m where m.game_id = g.id and m.user_id = ?) as reminded
             from releases r join games g on g.id = r.game_id
             where r.day >= ? and r.day <= ? ${platformFilter}
-            group by r.day, g.id
-            order by r.day asc, reminder_count desc, g.hypes desc, g.name asc`)
+            group by r.day, r.precision, g.id
+            order by r.day asc, ${PRECISION_RANK}, reminder_count desc, g.hypes desc, g.name asc`)
             .all(userId, fromDay, toDay, ...platforms);
         return withPlatforms(rows);
     }
@@ -218,7 +226,10 @@ export class Store {
         const rows = this.db.prepare(`with next as (
                 select r.game_id, min(r.day) as day from releases r where r.day >= ? and r.day <= ? ${platformFilter} group by r.game_id
             )
-            select next.day, g.*, (select group_concat(platform, char(31)) from releases r where r.game_id = g.id and r.day = next.day) as platforms,
+            select next.day, g.*,
+                (select r.precision from releases r where r.game_id = g.id and r.day = next.day order by ${PRECISION_RANK} limit 1) as precision,
+                (select group_concat(platform, char(31)) from releases r where r.game_id = g.id and r.day = next.day
+                    and r.precision = (select r.precision from releases r where r.game_id = g.id and r.day = next.day order by ${PRECISION_RANK} limit 1)) as platforms,
                 (select count(*) from reminders m where m.game_id = g.id) as reminder_count,
                 exists(select 1 from reminders m where m.game_id = g.id and m.user_id = ?) as reminded
             from next join games g on g.id = next.game_id
@@ -231,33 +242,35 @@ export class Store {
     userReminders(userId, today) {
         const rows = this.db.prepare(`select g.*,
                 (select min(day) from releases r where r.game_id = g.id and r.day >= ?) as day,
-                (select max(day) from releases r where r.game_id = g.id and r.day < ?) as past_day,
+                (select max(day) from releases r where r.game_id = g.id and r.day < ? and r.precision = 'day') as past_day,
                 (select count(*) from reminders m where m.game_id = g.id) as reminder_count,
                 1 as reminded
             from reminders m join games g on g.id = m.game_id
             where m.user_id = ?
             order by day is null, day asc, past_day desc, g.name asc`).all(today, today, userId);
-        return rows.map(row => ({
-            ...row,
-            platforms: this.db.prepare('select platform from releases where game_id = ? and day = ? order by platform')
-                .all(row.id, row.day ?? row.past_day ?? '').map(p => p.platform),
-        }));
+        return rows.map(row => this.withNextRelease(row, row.day ?? row.past_day));
     }
 
-    gamesByIds(ids, userId = null) {
+    // Adds the precision and platforms of a game's release on `day` (exact before estimates)
+    withNextRelease(row, day) {
+        if (!day) return { ...row, precision: null, platforms: [] };
+        const releases = this.db.prepare(`select r.platform, r.precision from releases r where r.game_id = ? and r.day = ?
+            order by ${PRECISION_RANK}, r.platform`).all(row.id, day);
+        const precision = releases[0]?.precision ?? null;
+        return { ...row, day, precision, platforms: releases.filter(r => r.precision === precision).map(r => r.platform) };
+    }
+
+    // Search results, each shown with its next release (or its latest one when all are past)
+    gamesByIds(ids, userId = null, today = '0000-00-00') {
         if (!ids.length) return [];
         const rows = this.db.prepare(`select g.*,
-                (select min(day) from releases r where r.game_id = g.id) as first_day,
-                (select group_concat(distinct platform) from releases r where r.game_id = g.id) as all_platforms,
+                coalesce((select min(day) from releases r where r.game_id = g.id and r.day >= ?),
+                         (select max(day) from releases r where r.game_id = g.id)) as next_day,
                 (select count(*) from reminders m where m.game_id = g.id) as reminder_count,
                 exists(select 1 from reminders m where m.game_id = g.id and m.user_id = ?) as reminded
-            from games g where g.id in (${ids.map(() => '?').join(',')})`).all(userId, ...ids);
+            from games g where g.id in (${ids.map(() => '?').join(',')})`).all(today, userId, ...ids);
         const byId = new Map(rows.map(row => [row.id, row]));
-        return ids.map(id => byId.get(id)).filter(Boolean).map(row => ({
-            ...row,
-            day: row.first_day,
-            platforms: row.all_platforms ? row.all_platforms.split(',') : [],
-        }));
+        return ids.map(id => byId.get(id)).filter(Boolean).map(row => this.withNextRelease(row, row.next_day));
     }
 
     platformsInUse(fromDay) {
@@ -289,7 +302,7 @@ export class Store {
     // Calendar entries for a user's ICS feed
     userReleaseDays(userId) {
         return withPlatforms(this.db.prepare(`select r.day, g.id, g.name, g.url, group_concat(r.platform, char(31)) as platforms
-            from reminders m join releases r on r.game_id = m.game_id join games g on g.id = m.game_id
+            from reminders m join releases r on r.game_id = m.game_id and r.precision = 'day' join games g on g.id = m.game_id
             where m.user_id = ? group by r.day, g.id order by r.day`).all(userId));
     }
 
@@ -297,7 +310,7 @@ export class Store {
     pendingNotifications(day) {
         const rows = withPlatforms(this.db.prepare(`select u.id as user_id, u.email, u.name as user_name, u.username,
                 g.id as game_id, g.name, g.url, group_concat(r.platform, char(31)) as platforms
-            from reminders m join users u on u.id = m.user_id join releases r on r.game_id = m.game_id and r.day = ?
+            from reminders m join users u on u.id = m.user_id join releases r on r.game_id = m.game_id and r.day = ? and r.precision = 'day'
             join games g on g.id = m.game_id
             where u.email is not null and u.email != ''
               and not exists (select 1 from notifications n where n.user_id = u.id and n.game_id = g.id and n.day = ?)

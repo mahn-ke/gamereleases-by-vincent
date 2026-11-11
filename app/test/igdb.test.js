@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { IgdbClient, coverUrl, mapGame } from '../src/igdb.js';
+import { IgdbClient, coverUrl, mapGame, releaseDay } from '../src/igdb.js';
 
 const NOV14 = Date.UTC(2026, 10, 14) / 1000;
 const NOV20 = Date.UTC(2026, 10, 20) / 1000;
 
-test('mapGame keeps exact-day releases with readable platform names', () => {
+test('mapGame keeps dated releases with readable platform names and skips TBD', () => {
     const game = mapGame({
         id: 1, name: 'Example Quest', slug: 'example-quest', url: 'https://www.igdb.com/games/example-quest', hypes: 12,
         cover: { image_id: 'co1' }, screenshots: [{ image_id: 'sc1' }], videos: [{ video_id: 'abc' }],
@@ -22,10 +22,12 @@ test('mapGame keeps exact-day releases with readable platform names', () => {
         ],
     });
     assert.deepEqual(game.releases, [
-        { day: '2026-11-14', platform: 'PlayStation 5' },
-        { day: '2026-11-14', platform: 'Xbox Series X' },
-        { day: '2026-11-20', platform: 'PC' },
-        { day: '2026-11-20', platform: 'Switch 2' },
+        { day: '2026-11-14', platform: 'PlayStation 5', precision: 'day' },
+        { day: '2026-11-14', platform: 'Xbox Series X', precision: 'day' },
+        { day: '2026-11-20', platform: 'PC', precision: 'day' },
+        { day: '2026-11-20', platform: 'Switch 2', precision: 'day' },
+        { day: '2026-12-31', platform: 'Switch', precision: 'year' },
+        { day: '2026-12-31', platform: 'Android', precision: 'quarter' },
     ]);
     assert.equal(game.coverImageId, 'co1');
     assert.equal(game.artImageId, 'sc1');
@@ -89,4 +91,25 @@ test('IgdbClient search neutralises quotes and reports errors', async () => {
     const client = new IgdbClient({ clientId: 'cid', clientSecret: 'secret', fetch, sleep: async () => {} });
     await assert.rejects(client.search('a"\\b'), /IGDB games failed with HTTP 400/);
     assert.equal(new IgdbClient({}).configured, false);
+});
+
+test('tentative dates anchor to the last day of their period', () => {
+    const at = (human, extra = {}) => releaseDay({ human, date: NOV20, ...extra });
+    assert.deepEqual(at('Nov 2026', { date_format: 1 }), { day: '2026-11-30', precision: 'month' });
+    assert.deepEqual(at('Feb 2028'), { day: '2028-02-29', precision: 'month' });
+    assert.deepEqual(at('Q1 2027', { category: 3 }), { day: '2027-03-31', precision: 'quarter' });
+    assert.deepEqual(at('Q2 2027'), { day: '2027-06-30', precision: 'quarter' });
+    assert.deepEqual(at('Q3 2027'), { day: '2027-09-30', precision: 'quarter' });
+    assert.deepEqual(at('Q4 2026', { date_format: 6 }), { day: '2026-12-31', precision: 'quarter' });
+    assert.deepEqual(at('2027', { date_format: 2 }), { day: '2027-12-31', precision: 'year' });
+    assert.deepEqual(at('Nov 14, 2026', { date: NOV14 }), { day: '2026-11-14', precision: 'day' });
+    // Numeric fallback when the human text is missing
+    assert.deepEqual(releaseDay({ date_format: 1, y: 2027, m: 3, date: NOV20 }), { day: '2027-03-31', precision: 'month' });
+    assert.deepEqual(releaseDay({ date_format: 5, y: 2027 }), { day: '2027-09-30', precision: 'quarter' });
+    assert.deepEqual(releaseDay({ date_format: 2, date: NOV20 }), { day: '2026-12-31', precision: 'year' });
+    // TBD and contradictory or unknown values are skipped
+    assert.equal(at('TBD', { date_format: 7 }), null);
+    assert.equal(at('TBD'), null);
+    assert.equal(releaseDay({ date_format: 0 }), null);
+    assert.equal(at('Foo 2026'), null);
 });

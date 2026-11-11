@@ -82,6 +82,14 @@ main { min-width: 0; padding: 0 28px 40px; }
 .noimg svg { width: 64px; height: 64px; color: #5a4b9e; }
 .badge { position: absolute; top: 8px; left: 8px; display: flex; align-items: center; gap: 4px; background: rgba(15, 11, 33, .85); color: #fff; font-size: 11px; padding: 3px 8px; border-radius: 6px; }
 .badge svg { color: #e879f9; width: 12px; height: 12px; }
+.badge.est { left: auto; right: 8px; color: #7dd3fc; border: 1px dashed rgba(125, 211, 252, .55); }
+.when.est { color: #7dd3fc; }
+.tentative { margin-top: 22px; }
+.tentative h3 { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-size: 14px; font-weight: 500; color: var(--muted); }
+.tentative .chip { color: #7dd3fc; border: 1px solid var(--line); border-radius: 8px; padding: 3px 10px; font-size: 14px; }
+.tentative .count { margin-left: auto; color: var(--muted); font-weight: 400; }
+.more { display: inline-block; margin-top: 14px; color: #c4b5fd; border: 1px solid var(--line); border-radius: 8px; padding: 7px 14px; }
+.more:hover { background: var(--panel); color: var(--text); }
 .meta h3 { margin: 0; font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .platforms, .when { display: flex; align-items: center; gap: 6px; margin: 2px 0 0; color: var(--muted); font-size: 13px; min-width: 0; }
 .platforms span, .when span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
