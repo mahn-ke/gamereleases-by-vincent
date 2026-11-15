@@ -42,6 +42,9 @@ button { font: inherit; color: inherit; }
 .sub { padding: 6px 10px; border-radius: 6px; font-size: 14px; }
 .sub:hover { background: rgba(255, 255, 255, .08); }
 .sub.active { background: rgba(21, 16, 47, .45); font-weight: 600; }
+.group form { margin: 0; }
+.group button.sub { width: 100%; background: none; text-align: left; }
+.group button.sub.active { background: rgba(21, 16, 47, .45); }
 .account { margin-top: auto; display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line); padding-top: 12px; }
 .account form { margin: 0; }
 
@@ -134,6 +137,12 @@ button:hover, .button:hover { filter: brightness(1.1); }
 .pager { display: flex; justify-content: space-between; padding-top: 10px; }
 .pager a { color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 7px 14px; }
 .pager a:hover { color: var(--text); background: var(--panel); }
+[hidden] { display: none !important; }
+button:disabled { opacity: .5; cursor: default; }
+[data-popscore] progress { width: 100%; accent-color: var(--accent-2); }
+.spinner { display: inline-block; width: .8em; height: .8em; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 
 @media (max-width: 1100px) {
     .shell, .shell.no-filters { grid-template-columns: 180px minmax(0, 1fr); }

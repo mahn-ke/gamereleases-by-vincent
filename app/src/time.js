@@ -62,6 +62,28 @@ export function nextMidnightInZone(now, timeZone) {
     return startOfDayInZone(addDays(dayInZone(now, timeZone), 1), timeZone);
 }
 
+function sevenInZone(day, timeZone) {
+    let instant = startOfDayInZone(day, timeZone).getTime() + 7 * 3600000;
+    const parts = zonedParts(new Date(instant), timeZone);
+    instant += (7 - parts.hour) * 3600000 - parts.minute * 60000 - parts.second * 1000;
+    return new Date(instant);
+}
+
+export function dailyRefreshTimes(now, timeZone) {
+    const day = dayInZone(now, timeZone);
+    const today = sevenInZone(day, timeZone);
+    return now >= today
+        ? { latest: today, next: sevenInZone(addDays(day, 1), timeZone) }
+        : { latest: sevenInZone(addDays(day, -1), timeZone), next: today };
+}
+
+export function timestampInZone(value, timeZone) {
+    if (!value) return null;
+    const p = zonedParts(new Date(value), timeZone);
+    const two = n => String(n).padStart(2, '0');
+    return `${p.year}/${two(p.month)}/${two(p.day)} ${two(p.hour)}:${two(p.minute)}:${two(p.second)} ${timeZone}`;
+}
+
 export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 // Tentative releases sit on the last day of their period, like releases.com:

@@ -93,6 +93,60 @@ test('IgdbClient search neutralises quotes and reports errors', async () => {
     assert.equal(new IgdbClient({}).configured, false);
 });
 
+test('popularity fetch batches and paginates both primitives, preserving successful zeros', async () => {
+    const ids = Array.from({ length: 501 }, (_, i) => i + 1);
+    let page = 0;
+    const fetch = fakeFetch(url => {
+        if (url.startsWith('https://id.twitch.tv')) return { body: { access_token: 'tok', expires_in: 3600 } };
+        page++;
+        if (page === 1) return { body: ids.slice(0, 500).map(game_id => ({ game_id, popularity_type: 1, value: .4 })) };
+        if (page === 2) return { body: [{ game_id: 1, popularity_type: 2, value: .8 }] };
+        return { body: [] };
+    });
+    const client = new IgdbClient({ clientId: 'cid', clientSecret: 'secret', fetch, sleep: async () => {} });
+    const scores = await client.popularityByIds(ids);
+    assert.equal(page, 3);
+    assert.deepEqual(scores[0], { id: 1, visits: .4, wantToPlay: .8 });
+    assert.deepEqual(scores.at(-1), { id: 501, visits: 0, wantToPlay: 0 });
+    const requests = fetch.calls.filter(c => c.url.endsWith('popularity_primitives'));
+    assert.match(requests[0].options.body, /popularity_type = \(1,2\)/);
+    assert.match(requests[1].options.body, /offset 500/);
+    assert.match(requests[2].options.body, /game_id = \(501\)/);
+});
+
+test('popularity rejects malformed values and aborts without another API request', async () => {
+    const fetch = fakeFetch(url => url.startsWith('https://id.twitch.tv')
+        ? { body: { access_token: 'tok', expires_in: 3600 } }
+        : { body: [{ game_id: 1, popularity_type: 2, value: 'bad' }] });
+    const client = new IgdbClient({ clientId: 'cid', clientSecret: 'secret', fetch, sleep: async () => {} });
+    await assert.rejects(client.popularityByIds([1]), /Invalid IGDB popularity primitive/);
+    const controller = new AbortController();
+    controller.abort();
+    const before = fetch.calls.length;
+    await assert.rejects(client.popularityByIds([1], controller.signal), { name: 'AbortError' });
+    assert.equal(fetch.calls.length, before);
+});
+
+test('overlapping IGDB requests share rate-limit admission and canceled waits do not poison it', async () => {
+    const times = [];
+    const fetch = fakeFetch(url => {
+        if (url.startsWith('https://id.twitch.tv')) return { body: { access_token: 'tok', expires_in: 3600 } };
+        times.push(Date.now());
+        return { body: [] };
+    });
+    const client = new IgdbClient({ clientId: 'cid', clientSecret: 'secret', fetch });
+    await client.accessToken();
+    await Promise.all([client.query('games', ''), client.query('popularity_primitives', ''), client.query('games', '')]);
+    assert.ok(times[1] - times[0] >= 290);
+    assert.ok(times[2] - times[1] >= 290);
+    const controller = new AbortController();
+    const canceled = client.query('games', '', false, controller.signal);
+    controller.abort();
+    await assert.rejects(canceled, { name: 'AbortError' });
+    await client.query('games', '');
+    assert.equal(times.length, 4);
+});
+
 test('tentative dates anchor to the last day of their period', () => {
     const at = (human, extra = {}) => releaseDay({ human, date: NOV20, ...extra });
     assert.deepEqual(at('Nov 2026', { date_format: 1 }), { day: '2026-11-30', precision: 'month' });

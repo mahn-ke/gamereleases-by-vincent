@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { COMMON_PLATFORMS, enabledByDefault, orderPlatforms } from './platforms.js';
 
 const SCHEMA = `
 create table if not exists users (
@@ -66,6 +67,18 @@ create table if not exists meta (
     key text primary key,
     value text
 );
+create table if not exists user_platform_preferences (
+    user_id integer not null references users(id) on delete cascade,
+    platform text not null,
+    enabled integer not null check(enabled in (0, 1)),
+    primary key(user_id, platform)
+);
+create table if not exists game_popularity (
+    game_id integer primary key references games(id) on delete cascade,
+    visits real not null,
+    want_to_play real not null,
+    refreshed_at text not null
+);
 `;
 
 export function newToken() {
@@ -94,6 +107,7 @@ export function openDatabase(dataDir) {
     addColumn('users', 'email_notifications', 'integer not null default 1');
     addColumn('users', 'email_synced_at', 'integer');
     addColumn('login_states', 'silent', 'integer not null default 0');
+    addColumn('sessions', 'admin_until', 'integer not null default 0');
     return new Store(db);
 }
 
@@ -167,15 +181,15 @@ export class Store {
 
     // Sessions --------------------------------------------------------------
 
-    createSession(userId, idToken, ttlSeconds) {
+    createSession(userId, idToken, ttlSeconds, adminUntil = 0) {
         const id = newToken();
-        this.db.prepare('insert into sessions (id, user_id, id_token, expires_at) values (?, ?, ?, ?)').run(id, userId, idToken ?? null, now() + ttlSeconds);
+        this.db.prepare('insert into sessions (id, user_id, id_token, expires_at, admin_until) values (?, ?, ?, ?, ?)').run(id, userId, idToken ?? null, now() + ttlSeconds, adminUntil);
         return id;
     }
 
     getSessionUser(sessionId) {
         if (!sessionId) return null;
-        return this.db.prepare(`select users.* from sessions join users on users.id = sessions.user_id
+        return this.db.prepare(`select users.*, sessions.admin_until from sessions join users on users.id = sessions.user_id
             where sessions.id = ? and sessions.expires_at > ?`).get(sessionId, now()) ?? null;
     }
 
@@ -201,6 +215,43 @@ export class Store {
 
     // Games -----------------------------------------------------------------
 
+    allPlatforms() {
+        const platforms = this.db.prepare('select distinct platform from releases').all().map(row => row.platform);
+        return orderPlatforms(platforms.length ? platforms : COMMON_PLATFORMS);
+    }
+
+    platformPreferences(userId, platforms) {
+        if (userId == null) return platforms.filter(enabledByDefault);
+        const insert = this.db.prepare('insert or ignore into user_platform_preferences values (?, ?, ?)');
+        transaction(this.db, () => {
+            for (const platform of platforms) insert.run(userId, platform, Number(enabledByDefault(platform)));
+        });
+        const enabled = new Set(this.db.prepare('select platform from user_platform_preferences where user_id = ? and enabled = 1').all(userId).map(row => row.platform));
+        return platforms.filter(p => enabled.has(p));
+    }
+
+    savePlatformPreferences(userId, platforms, selected) {
+        const enabled = new Set(selected);
+        const save = this.db.prepare(`insert into user_platform_preferences values (?, ?, ?)
+            on conflict(user_id, platform) do update set enabled = excluded.enabled`);
+        transaction(this.db, () => {
+            for (const platform of platforms) save.run(userId, platform, Number(enabled.has(platform)));
+        });
+    }
+
+    popularityGameIds(coldOnly = false) {
+        return this.db.prepare(`select g.id from games g ${coldOnly ? 'left join game_popularity p on p.game_id = g.id where p.game_id is null' : ''} order by g.id`)
+            .all().map(row => row.id);
+    }
+
+    savePopularity(scores, timestamp) {
+        const save = this.db.prepare(`insert into game_popularity values (?, ?, ?, ?)
+            on conflict(game_id) do update set visits = excluded.visits, want_to_play = excluded.want_to_play, refreshed_at = excluded.refreshed_at`);
+        transaction(this.db, () => {
+            for (const score of scores) save.run(score.id, score.visits, score.wantToPlay, timestamp);
+        });
+    }
+
     upsertGames(games) {
         const upsert = this.db.prepare(`insert into games (id, name, slug, url, cover_image_id, art_image_id, video_id, hypes, updated_at)
             values (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -224,22 +275,24 @@ export class Store {
     }
 
     // Release cards for a day range, one per game and day, with the viewer's reminder state
-    releasesBetween(fromDay, toDay, { userId = null, platforms = [] } = {}) {
-        const platformFilter = platforms.length ? `and r.game_id in (select game_id from releases p where p.day = r.day and p.precision = r.precision and p.platform in (${platforms.map(() => '?').join(',')}))` : '';
+    releasesBetween(fromDay, toDay, { userId = null, platforms = null } = {}) {
+        if (platforms?.length === 0) return [];
+        const platformFilter = platforms ? `and r.game_id in (select game_id from releases p where p.day = r.day and p.precision = r.precision and p.platform in (${platforms.map(() => '?').join(',')}))` : '';
         const rows = this.db.prepare(`select r.day, r.precision, g.*, group_concat(r.platform, char(31)) as platforms,
                 (select count(*) from reminders m where m.game_id = g.id) as reminder_count,
                 exists(select 1 from reminders m where m.game_id = g.id and m.user_id = ?) as reminded
-            from releases r join games g on g.id = r.game_id
+            from releases r join games g on g.id = r.game_id left join game_popularity pop on pop.game_id = g.id
             where r.day >= ? and r.day <= ? ${platformFilter}
             group by r.day, r.precision, g.id
-            order by r.day asc, ${PRECISION_RANK}, reminder_count desc, g.hypes desc, g.name asc`)
-            .all(userId, fromDay, toDay, ...platforms);
+            order by r.day asc, ${PRECISION_RANK}, (coalesce(pop.visits, 0) + coalesce(pop.want_to_play, 0)) * 0.5 desc, reminder_count desc, g.hypes desc, g.name asc, g.id`)
+            .all(userId, fromDay, toDay, ...(platforms ?? []));
         return withPlatforms(rows);
     }
 
     // Most anticipated upcoming games (each listed once, on its next release day)
-    hotReleases(fromDay, toDay, { userId = null, platforms = [], limit = 60 } = {}) {
-        const platformFilter = platforms.length ? `and r.platform in (${platforms.map(() => '?').join(',')})` : '';
+    hotReleases(fromDay, toDay, { userId = null, platforms = null, limit = 60 } = {}) {
+        if (platforms?.length === 0) return [];
+        const platformFilter = platforms ? `and r.platform in (${platforms.map(() => '?').join(',')})` : '';
         const rows = this.db.prepare(`with next as (
                 select r.game_id, min(r.day) as day from releases r where r.day >= ? and r.day <= ? ${platformFilter} group by r.game_id
             )
@@ -249,9 +302,9 @@ export class Store {
                     and r.precision = (select r.precision from releases r where r.game_id = g.id and r.day = next.day order by ${PRECISION_RANK} limit 1)) as platforms,
                 (select count(*) from reminders m where m.game_id = g.id) as reminder_count,
                 exists(select 1 from reminders m where m.game_id = g.id and m.user_id = ?) as reminded
-            from next join games g on g.id = next.game_id
-            order by g.hypes desc, reminder_count desc, next.day asc limit ?`)
-            .all(fromDay, toDay, ...platforms, userId, limit);
+            from next join games g on g.id = next.game_id left join game_popularity pop on pop.game_id = g.id
+            order by (coalesce(pop.visits, 0) + coalesce(pop.want_to_play, 0)) * 0.5 desc, reminder_count desc, g.hypes desc, next.day asc, g.name asc, g.id limit ?`)
+            .all(fromDay, toDay, ...(platforms ?? []), userId, limit);
         return withPlatforms(rows);
     }
 

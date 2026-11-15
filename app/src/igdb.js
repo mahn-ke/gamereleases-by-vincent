@@ -1,5 +1,6 @@
 // IGDB (https://api-docs.igdb.com) via Twitch client credentials.
 import { MONTHS, estimateAnchor, utcDay } from './time.js';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const TOKEN_URL = 'https://id.twitch.tv/oauth2/token';
 const API_URL = 'https://api.igdb.com/v4';
@@ -97,24 +98,25 @@ function quote(text) {
 }
 
 export class IgdbClient {
-    constructor({ clientId, clientSecret, fetch = globalThis.fetch, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
+    constructor({ clientId, clientSecret, fetch = globalThis.fetch, sleep: wait = (ms, signal) => sleep(ms, undefined, { signal }) }) {
         this.clientId = clientId;
         this.clientSecret = clientSecret;
         this.fetch = fetch;
-        this.sleep = sleep;
+        this.sleep = wait;
         this.token = null;
         this.tokenExpiresAt = 0;
         this.lastRequestAt = 0;
+        this.admission = Promise.resolve();
     }
 
     get configured() {
         return Boolean(this.clientId && this.clientSecret);
     }
 
-    async accessToken(force = false) {
+    async accessToken(force = false, signal) {
         if (!force && this.token && Date.now() < this.tokenExpiresAt) return this.token;
         const params = new URLSearchParams({ client_id: this.clientId, client_secret: this.clientSecret, grant_type: 'client_credentials' });
-        const response = await this.fetch(`${TOKEN_URL}?${params}`, { method: 'POST' });
+        const response = await this.fetch(`${TOKEN_URL}?${params}`, { method: 'POST', signal });
         if (!response.ok) throw new Error(`Twitch token request failed with HTTP ${response.status}`);
         const body = await response.json();
         this.token = body.access_token;
@@ -122,23 +124,59 @@ export class IgdbClient {
         return this.token;
     }
 
-    async query(endpoint, body, retried = false) {
+    async admit(signal) {
+        const turn = this.admission.then(async () => {
+            signal?.throwIfAborted();
+            const wait = this.lastRequestAt + REQUEST_SPACING_MS - Date.now();
+            if (wait > 0) await this.sleep(wait, signal);
+            signal?.throwIfAborted();
+            this.lastRequestAt = Date.now();
+        });
+        // A canceled waiter must not poison admission for unrelated requests.
+        this.admission = turn.catch(() => {});
+        await turn;
+    }
+
+    async query(endpoint, body, retried = false, signal) {
         if (!this.configured) throw new Error('IGDB is not configured (TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET)');
-        const wait = this.lastRequestAt + REQUEST_SPACING_MS - Date.now();
-        if (wait > 0) await this.sleep(wait);
-        this.lastRequestAt = Date.now();
+        const token = await this.accessToken(retried, signal);
+        await this.admit(signal);
         const response = await this.fetch(`${API_URL}/${endpoint}`, {
             method: 'POST',
-            headers: { 'Client-ID': this.clientId, Authorization: `Bearer ${await this.accessToken(retried)}`, Accept: 'application/json' },
+            signal,
+            headers: { 'Client-ID': this.clientId, Authorization: `Bearer ${token}`, Accept: 'application/json' },
             body,
         });
-        if (response.status === 401 && !retried) return this.query(endpoint, body, true);
+        if (response.status === 401 && !retried) return this.query(endpoint, body, true, signal);
         if (response.status === 429 && !retried) {
-            await this.sleep(1000);
-            return this.query(endpoint, body, true);
+            await this.sleep(1000, signal);
+            return this.query(endpoint, body, true, signal);
         }
         if (!response.ok) throw new Error(`IGDB ${endpoint} failed with HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
         return response.json();
+    }
+
+    async popularityByIds(ids, signal) {
+        const scores = new Map(ids.map(id => [id, { id, visits: 0, wantToPlay: 0 }]));
+        for (let i = 0; i < ids.length; i += PAGE_SIZE) {
+            const chunk = ids.slice(i, i + PAGE_SIZE);
+            const seen = new Set();
+            for (let offset = 0; ; offset += PAGE_SIZE) {
+                const page = await this.query('popularity_primitives',
+                    `fields game_id,popularity_type,value; where game_id = (${chunk.join(',')}) & popularity_type = (1,2); sort id asc; limit ${PAGE_SIZE}; offset ${offset};`, false, signal);
+                if (!Array.isArray(page)) throw new Error('Invalid IGDB popularity response');
+                for (const row of page) {
+                    if (!row || !chunk.includes(row.game_id) || ![1, 2].includes(row.popularity_type)
+                        || typeof row.value !== 'number' || !Number.isFinite(row.value) || row.value < 0
+                        || seen.has(`${row.game_id}:${row.popularity_type}`)) throw new Error('Invalid IGDB popularity primitive');
+                    seen.add(`${row.game_id}:${row.popularity_type}`);
+                    scores.get(row.game_id)[row.popularity_type === 1 ? 'visits' : 'wantToPlay'] = row.value;
+                }
+                if (page.length < PAGE_SIZE) break;
+            }
+        }
+        signal?.throwIfAborted();
+        return [...scores.values()];
     }
 
     // Games with at least one release date inside [fromUnix, toUnix)

@@ -11,7 +11,6 @@ const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..',
 const SESSION_COOKIE = 'gr_session';
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const CALENDAR_DAYS = 14;
-const DEFAULT_PLATFORMS = ['PC', 'PlayStation 5', 'Xbox Series X', 'Switch', 'Switch 2', 'PlayStation 4', 'Xbox One', 'iOS', 'Android'];
 
 function parseCookies(header = '') {
     const cookies = {};
@@ -29,14 +28,28 @@ function sameToken(a, b) {
 }
 
 function platformsFrom(queryValue) {
-    return [].concat(queryValue ?? []).filter(p => typeof p === 'string' && p.length <= 40).slice(0, 20);
+    const values = [].concat(queryValue ?? []);
+    if (values.length > 1000 || values.some(p => typeof p !== 'string' || !p.length || p.length > 100)) {
+        const error = new Error('Invalid platform selection');
+        error.status = 400;
+        throw error;
+    }
+    return [...new Set(values)];
 }
 
-export function createApp({ config, store, igdb, auth, log = console }) {
+export function createApp({ config, store, igdb, auth, popscore = null, log = console }) {
     const app = express();
     const secureCookies = config.baseUrl.startsWith('https://');
     app.disable('x-powered-by');
     app.set('trust proxy', true);
+    app.set('query parser', text => {
+        const parsed = {};
+        for (const [key, value] of new URLSearchParams(text)) {
+            if (Object.hasOwn(parsed, key)) parsed[key] = [].concat(parsed[key], value);
+            else Object.defineProperty(parsed, key, { value, writable: true, enumerable: true });
+        }
+        return parsed;
+    });
 
     app.use((req, res, next) => {
         res.set({
@@ -48,11 +61,13 @@ export function createApp({ config, store, igdb, auth, log = console }) {
     });
     app.use('/static', express.static(PUBLIC_DIR, { maxAge: '1h' }));
     app.use(express.json({ limit: '4kb' }));
-    app.use(express.urlencoded({ extended: false, limit: '2kb' }));
+    app.use(express.urlencoded({ extended: false, limit: '128kb', parameterLimit: 4000 }));
 
     app.use((req, res, next) => {
         req.sessionId = parseCookies(req.headers.cookie)[SESSION_COOKIE] || null;
         req.user = store.getSessionUser(req.sessionId);
+        req.isAdmin = Boolean(req.user && req.user.admin_until > Date.now() / 1000);
+        if (req.user || req.path === '/reminders') res.set('Cache-Control', 'private, no-store');
         next();
     });
 
@@ -66,16 +81,19 @@ export function createApp({ config, store, igdb, auth, log = console }) {
     const context = (req, extra = {}) => {
         const today = dayInZone(new Date(), config.timeZone);
         const lastSync = store.getMeta('last_sync');
-        const inUse = store.platformsInUse(addDays(today, -config.syncDaysBack));
-        const allPlatforms = [...DEFAULT_PLATFORMS.filter(p => inUse.includes(p)), ...inUse.filter(p => !DEFAULT_PLATFORMS.includes(p))];
+        const allPlatforms = store.allPlatforms();
+        const filterOverride = Object.hasOwn(req.query, 'platform') || req.query.filtered === '1';
+        const platforms = filterOverride ? platformsFrom(req.query.platform) : store.platformPreferences(req.user?.id, allPlatforms);
         return {
             user: req.user,
+            isAdmin: req.isAdmin,
             today,
             from: today,
             path: req.originalUrl,
             basePath: req.path,
-            platforms: platformsFrom(req.query.platform),
-            allPlatforms: allPlatforms.length ? allPlatforms : DEFAULT_PLATFORMS,
+            platforms,
+            filterOverride,
+            allPlatforms,
             showFilters: true,
             syncNote: lastSync ? null : (igdb.configured ? 'The first sync with IGDB is still running' : 'IGDB is not configured yet'),
             ...extra,
@@ -90,6 +108,23 @@ export function createApp({ config, store, igdb, auth, log = console }) {
 
     app.get('/healthz', (req, res) => {
         res.json({ ok: true, lastSync: store.getMeta('last_sync'), igdb: igdb.configured, sso: auth.configured });
+    });
+
+    app.post('/filters', (req, res) => {
+        const destination = req.body?.destination;
+        if (!['/', '/hot'].includes(destination) || (req.body.from && !isDay(req.body.from))) return res.status(400).send('Invalid filter destination');
+        const catalog = store.allPlatforms();
+        const options = req.body.option == null ? catalog : platformsFrom(req.body.option);
+        const selected = req.body.all === '1' ? options : platformsFrom(req.body.platform);
+        if (options.some(p => !catalog.includes(p)) || selected.some(p => !options.includes(p))) return res.status(400).send('Unknown platform');
+        if (req.user) store.savePlatformPreferences(req.user.id, options, selected);
+        const query = new URLSearchParams();
+        if (req.body.from) query.set('from', req.body.from);
+        if (!req.user) {
+            query.set('filtered', '1');
+            for (const platform of selected) query.append('platform', platform);
+        }
+        res.redirect(303, `${destination}${query.size ? `?${query}` : ''}`);
     });
 
     app.get('/', (req, res) => {
@@ -116,6 +151,7 @@ export function createApp({ config, store, igdb, auth, log = console }) {
                 if (igdb.configured) {
                     const games = await igdb.search(q);
                     store.upsertGames(games);
+                    popscore?.requestCold();
                     ids = games.map(game => game.id);
                 } else {
                     ids = store.searchLocal(q);
@@ -135,6 +171,7 @@ export function createApp({ config, store, igdb, auth, log = console }) {
         res.send(remindersPage(ctx, store.userReminders(req.user.id, ctx.today), {
             icsUrl: `${config.baseUrl}/${encodeURIComponent(req.user.username)}/${req.user.ics_token}.ics`,
             accountUrl: auth.configured ? auth.accountUrl('/reminders') : null,
+            popscore: req.isAdmin ? popscore?.status() : null,
         }));
     });
 
@@ -142,6 +179,24 @@ export function createApp({ config, store, igdb, auth, log = console }) {
         if (!requireUser(req, res)) return;
         store.setEmailNotifications(req.user.id, req.body?.enabled === '1');
         res.redirect(303, '/reminders');
+    });
+
+    app.use('/api/popscore', (req, res, next) => {
+        res.set('Cache-Control', 'no-store');
+        if (!req.user) return res.status(401).json({ error: 'Log in required' });
+        if (!req.isAdmin) return res.status(403).json({ error: 'Realm administration role required; log in again if your role or token changed.' });
+        if (!popscore) return res.status(503).json({ error: 'Popularity refresh is unavailable' });
+        next();
+    });
+    app.get('/api/popscore', (req, res) => res.json(popscore.status()));
+    app.post('/api/popscore/start', (req, res) => {
+        const result = popscore.refresh();
+        if (result === 'unavailable') return res.status(503).json({ error: 'IGDB is not configured' });
+        res.status(result === 'running' ? 409 : 202).json(popscore.status());
+    });
+    app.post('/api/popscore/cancel', (req, res) => {
+        popscore.cancel();
+        res.status(202).json(popscore.status());
     });
 
     app.post('/reminders/ics/regenerate', (req, res) => {
@@ -183,9 +238,9 @@ export function createApp({ config, store, igdb, auth, log = console }) {
         try {
             const result = await auth.complete(new URL(req.originalUrl, config.baseUrl));
             if (result.interactive) return res.redirect(302, `/login?return=${encodeURIComponent(safeReturnPath(result.returnTo))}`);
-            const { user, idToken, returnTo } = result;
+            const { user, idToken, adminUntil, returnTo } = result;
             if (req.sessionId) store.deleteSession(req.sessionId);
-            const sessionId = store.createSession(user.id, idToken, SESSION_TTL_SECONDS);
+            const sessionId = store.createSession(user.id, idToken, SESSION_TTL_SECONDS, adminUntil);
             res.cookie(SESSION_COOKIE, sessionId, { httpOnly: true, secure: secureCookies, sameSite: 'lax', path: '/', maxAge: SESSION_TTL_SECONDS * 1000 });
             res.redirect(302, safeReturnPath(returnTo));
         } catch (error) {
@@ -214,6 +269,10 @@ export function createApp({ config, store, igdb, auth, log = console }) {
 
     // eslint-disable-next-line no-unused-vars
     app.use((error, req, res, next) => {
+        if (error.status === 400 || error.status === 413) {
+            log.warn('Invalid request:', error.message);
+            return res.status(error.status).type('text').send(error.message);
+        }
         log.error(error);
         res.status(500).send(messagePage(context(req, { view: null, showFilters: false }), 'Something went wrong', 'Please try again in a moment.'));
     });

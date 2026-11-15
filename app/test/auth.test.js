@@ -48,6 +48,32 @@ test('account console link returns through a silent refresh', () => {
     assert.equal(url.searchParams.get('referrer_uri'), 'https://gamereleases.example.test/auth/refresh?return=%2Freminders');
 });
 
+test('code exchange reads admin roles and expiry from the access token, not the ID token', async (t) => {
+    const { auth, store } = setup();
+    t.after(() => store.close());
+    const now = Math.floor(Date.now() / 1000);
+    const identity = {
+        iss: auth.config.oidc.issuer, sub: 'user-1', aud: auth.config.oidc.clientId,
+        iat: now, exp: now + 3600, preferred_username: 'admin',
+    };
+    const access = {
+        iss: identity.iss, sub: identity.sub, exp: now + 60,
+        resource_access: { 'realm-management': { roles: ['manage-realm'] } },
+    };
+    const jwt = claims => `${Buffer.from('{"alg":"RS256"}').toString('base64url')}.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`;
+    auth.oidcConfig[oidc.customFetch] = async () => new Response(JSON.stringify({
+        access_token: jwt(access), id_token: jwt(identity), token_type: 'Bearer', expires_in: 60,
+    }), { headers: { 'content-type': 'application/json' } });
+    const complete = async () => {
+        const state = new URL(await auth.loginUrl('/reminders')).searchParams.get('state');
+        return auth.complete(new URL(`${auth.redirectUri}?code=test-code&state=${state}`));
+    };
+    assert.equal((await complete()).adminUntil, access.exp);
+    identity.resource_access = access.resource_access;
+    access.resource_access = {};
+    assert.equal((await complete()).adminUntil, 0);
+});
+
 test('existing databases gain the new user columns with mails enabled', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');

@@ -29,6 +29,18 @@ function query(params) {
     return text ? `?${text}` : '';
 }
 
+function filterQuery(ctx) {
+    return ctx.filterOverride ? { filtered: '1', platform: ctx.platforms } : {};
+}
+
+function filterState(ctx) {
+    return ctx.filterOverride ? html`<input type="hidden" name="filtered" value="1">${ctx.platforms.map(p => html`<input type="hidden" name="platform" value="${p}">`)}` : '';
+}
+
+function filterOptions(ctx) {
+    return ctx.allPlatforms.map(p => html`<input type="hidden" name="option" value="${p}">`);
+}
+
 function bell(game, ctx) {
     const label = `${game.reminded ? 'Remove reminder for' : 'Remind me about'} ${game.name}`;
     if (!ctx.user) {
@@ -72,6 +84,7 @@ function grid(games, ctx, options = {}) {
 function sidebar(ctx) {
     const nav = (href, label, iconSvg, active) => html`<a class="nav${active ? ' active' : ''}" href="${href}">${iconSvg}<span>${label}</span></a>`;
     const selected = new Set(ctx.platforms);
+    const shortcut = platform => html`<button type="submit" name="platform" value="${platform}" class="sub${selected.size === 1 && selected.has(platform) ? ' active' : ''}">${platform}</button>`;
     return html`<aside class="sidebar">
         <a class="logo" href="/" aria-label="gamereleases home"><span class="mark"><i></i><i></i><i></i></span><span>gamereleases</span></a>
         <nav>
@@ -80,11 +93,14 @@ function sidebar(ctx) {
             ${nav('/search', 'Search', icon.search, ctx.view === 'search')}
             ${nav('/reminders', 'My reminders', icon.bell, ctx.view === 'reminders')}
         </nav>
-        <div class="group">
+        <form class="group" method="post" action="/filters">
+            <input type="hidden" name="destination" value="${ctx.basePath === '/hot' ? '/hot' : '/'}">
+            ${ctx.from ? html`<input type="hidden" name="from" value="${ctx.from}">` : ''}
+            ${filterOptions(ctx)}
             <div class="group-title">${icon.pad}<span>Games</span></div>
-            <a class="sub${selected.size === 0 ? ' active' : ''}" href="${ctx.basePath}${query({ from: ctx.from })}">All</a>
-            ${ctx.allPlatforms.map(platform => html`<a class="sub${selected.size === 1 && selected.has(platform) ? ' active' : ''}" href="${ctx.basePath}${query({ from: ctx.from, platform })}">${platform}</a>`)}
-        </div>
+            <button type="submit" name="all" value="1" class="sub${ctx.allPlatforms.every(p => selected.has(p)) ? ' active' : ''}">All</button>
+            ${ctx.allPlatforms.map(platform => shortcut(platform))}
+        </form>
         <div class="account">
             <div class="group-title small">Account</div>
             ${ctx.user ? html`
@@ -99,7 +115,9 @@ function filters(ctx) {
     if (!ctx.showFilters) return '';
     const selected = new Set(ctx.platforms);
     return html`<aside class="filters">
-        <form method="get" action="${ctx.basePath}" class="filter-form">
+        <form method="post" action="/filters" class="filter-form">
+            <input type="hidden" name="destination" value="${ctx.basePath}">
+            ${filterOptions(ctx)}
             <h2>${icon.filter}<span>Filter</span></h2>
             ${ctx.from ? html`<input type="hidden" name="from" value="${ctx.from}">` : ''}
             <fieldset>
@@ -112,13 +130,13 @@ function filters(ctx) {
 }
 
 function topbar(ctx) {
-    const tab = (href, label, iconSvg, active) => html`<a class="tab${active ? ' active' : ''}" href="${href}${query({ platform: ctx.platforms })}">${iconSvg}<span>${label}</span></a>`;
+    const tab = (href, label, iconSvg, active) => html`<a class="tab${active ? ' active' : ''}" href="${href}${query(filterQuery(ctx))}">${iconSvg}<span>${label}</span></a>`;
     return html`<header class="topbar">
         ${ctx.view === 'calendar' ? html`<form class="datepick" method="get" action="/">
-            ${ctx.platforms.map(p => html`<input type="hidden" name="platform" value="${p}">`)}
+            ${filterState(ctx)}
             <label>${icon.check}<strong>${shortDayLabel(ctx.from)}</strong><span>${ctx.from === ctx.today ? 'Today' : dayLabel(ctx.from, ctx.today)}</span>
             <input type="date" name="from" value="${ctx.from}" aria-label="Jump to date"></label>
-            ${ctx.from !== ctx.today ? html`<a class="today" href="/${query({ platform: ctx.platforms })}">Today</a>` : ''}
+            ${ctx.from !== ctx.today ? html`<a class="today" href="/${query(filterQuery(ctx))}">Today</a>` : ''}
         </form>` : html`<div class="title">${ctx.title}</div>`}
         <div class="tabs">
             ${tab('/', 'Calendar', icon.calendar, ctx.view === 'calendar')}
@@ -157,7 +175,7 @@ function tentativeGroup(day, precision, games, ctx, { days, showAll }) {
     return html`<div class="tentative">
         <h3><span>Tentative dates</span><span class="chip">${estimateLabel(precision, day)}</span><small class="count">${games.length} ${games.length === 1 ? 'game' : 'games'}</small></h3>
         ${grid(shown, ctx)}
-        ${shown.length < games.length ? html`<a class="more" href="/${query({ from: day, days: 1, all: 1, platform: ctx.platforms })}">Show all ${games.length} · ${estimateLabel(precision, day, { withYear: true })}</a>` : ''}
+        ${shown.length < games.length ? html`<a class="more" href="/${query({ from: day, days: 1, all: 1, ...filterQuery(ctx) })}">Show all ${games.length} · ${estimateLabel(precision, day, { withYear: true })}</a>` : ''}
     </div>`;
 }
 
@@ -182,8 +200,8 @@ export function calendarPage(ctx, releases, { days, showAll = false }) {
             ${PRECISION_ORDER.filter(p => tentative.has(p)).map(p => tentativeGroup(day, p, tentative.get(p), ctx, { days, showAll }))}
         </section>`)}
         <nav class="pager">
-            <a href="/${query({ from: earlier, days: days === 14 ? null : days, platform: ctx.platforms })}">← ${shortDayLabel(earlier)}</a>
-            <a href="/${query({ from: later, days: days === 14 ? null : days, platform: ctx.platforms })}">${shortDayLabel(later)} →</a>
+            <a href="/${query({ from: earlier, days: days === 14 ? null : days, ...filterQuery(ctx) })}">← ${shortDayLabel(earlier)}</a>
+            <a href="/${query({ from: later, days: days === 14 ? null : days, ...filterQuery(ctx) })}">${shortDayLabel(later)} →</a>
         </nav>`;
     return layout(ctx, content);
 }
@@ -229,11 +247,22 @@ function mailPanel(ctx, accountUrl) {
     </section>`;
 }
 
-export function remindersPage(ctx, reminders, { icsUrl, accountUrl = null }) {
+export function remindersPage(ctx, reminders, { icsUrl, accountUrl = null, popscore }) {
     const upcoming = reminders.filter(g => g.day);
     const undated = reminders.filter(g => !g.day && !g.past_day);
     const released = reminders.filter(g => !g.day && g.past_day).map(g => ({ ...g, day: g.past_day, precision: 'day' }));
     const content = html`
+        ${ctx.isAdmin && popscore ? html`<section class="panel" data-popscore>
+            <h2>IGDB popularity refresh <span data-popscore-busy hidden aria-label="Running" class="spinner"></span></h2>
+            <p data-popscore-state role="status">Loading refresh status</p>
+            <progress data-popscore-progress max="1" value="0" aria-label="Games refreshed"></progress>
+            <p data-popscore-completed>Last completed: ${popscore.lastCompleted || 'Never'}</p>
+            <p data-popscore-next>Next refresh: ${popscore.nextRefresh}</p>
+            <p data-popscore-error role="alert"></p>
+            <button type="button" data-popscore-start>Refresh all games</button>
+            <button type="button" data-popscore-cancel hidden>Cancel refresh</button>
+            <noscript><p>Enable JavaScript to view progress and control background refreshes.</p></noscript>
+        </section>` : ''}
         <section class="panel">
             <h2>Calendar subscription</h2>
             <p>Subscribe to this address in your calendar app. It updates on its own and needs no login, so treat it like a password.</p>

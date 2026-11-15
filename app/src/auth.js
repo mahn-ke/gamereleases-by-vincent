@@ -14,6 +14,28 @@ export function usernameFromClaims(claims) {
 // Errors with which an OIDC provider answers prompt=none when it cannot respond silently
 const INTERACTION_ERRORS = new Set(['login_required', 'interaction_required', 'consent_required', 'account_selection_required']);
 
+// Only consume access tokens returned directly by the server-side code exchange,
+// never tokens supplied by a browser. The ID token is validated by openid-client.
+export function adminUntilFromAccessToken(accessToken, identity) {
+    const parts = typeof accessToken === 'string' ? accessToken.split('.') : [];
+    if (parts.length !== 3 || parts.some(part => !/^[A-Za-z0-9_-]+$/.test(part))) {
+        throw new Error('The identity provider returned a malformed access token');
+    }
+    let claims;
+    try {
+        claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    } catch (error) {
+        throw new Error('The identity provider returned a malformed access token', { cause: error });
+    }
+    if (!claims || typeof claims !== 'object' || Array.isArray(claims)
+        || claims.iss !== identity.iss || claims.sub !== identity.sub
+        || !Number.isInteger(claims.exp) || claims.exp <= Date.now() / 1000) {
+        throw new Error('The access token is expired or does not match the signed-in identity');
+    }
+    const roles = claims.resource_access?.['realm-management']?.roles;
+    return Array.isArray(roles) && roles.includes('manage-realm') ? claims.exp : 0;
+}
+
 export class Auth {
     constructor({ config, store, log = console }) {
         this.config = config;
@@ -67,7 +89,7 @@ export class Auth {
         return oidc.buildAuthorizationUrl(provider, parameters).href;
     }
 
-    // Returns { user, idToken, returnTo } for a completed authorization code flow, or
+    // Returns { user, idToken, adminUntil, returnTo } for a completed code flow, or
     // { interactive: true, returnTo } when a silent attempt needs a regular login instead
     async complete(callbackUrl) {
         const state = callbackUrl.searchParams.get('state');
@@ -84,12 +106,13 @@ export class Auth {
             expectedState: state,
         });
         const claims = tokens.claims();
+        const adminUntil = adminUntilFromAccessToken(tokens.access_token, claims);
         const user = this.store.upsertUser({
             sub: claims.sub,
             username: usernameFromClaims(claims),
             email: claims.email,
             name: claims.name || claims.preferred_username,
         });
-        return { user, idToken: tokens.id_token, returnTo: pending.return_to || '/' };
+        return { user, idToken: tokens.id_token, adminUntil, returnTo: pending.return_to || '/' };
     }
 }

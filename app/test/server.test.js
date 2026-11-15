@@ -2,31 +2,34 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createApp } from '../src/server.js';
-import { safeReturnPath, usernameFromClaims } from '../src/auth.js';
+import { safeReturnPath, usernameFromClaims, adminUntilFromAccessToken } from '../src/auth.js';
+import { PopScore } from '../src/popscore.js';
 import { seededStore, testConfig } from './helpers.js';
 
 const quiet = { info() {}, warn() {}, error() {} };
 const ORIGIN = 'https://gamereleases.example.test';
 
-async function startServer({ igdb = { configured: false }, auth = { configured: false } } = {}) {
+async function startServer({ igdb = { configured: false }, auth = { configured: false }, withPopscore = false } = {}) {
     const { store, alice, bob } = seededStore();
     store.setMeta('last_sync', new Date().toISOString());
-    const app = createApp({ config: testConfig(), store, igdb, auth, log: quiet });
+    const popscore = withPopscore ? new PopScore({ store, igdb, log: quiet, batchSize: 2 }) : null;
+    const app = createApp({ config: testConfig(), store, igdb, auth, popscore, log: quiet });
     const server = app.listen(0);
     await once(server, 'listening');
     const base = `http://127.0.0.1:${server.address().port}`;
-    const session = user => `gr_session=${store.createSession(user.id, null, 3600)}`;
-    const request = (path, { cookie, origin, method = 'GET', json } = {}) => fetch(base + path, {
+    const session = (user, adminUntil = 0) => `gr_session=${store.createSession(user.id, null, 3600, adminUntil)}`;
+    const request = (path, { cookie, origin, method = 'GET', json, form } = {}) => fetch(base + path, {
         method,
         redirect: 'manual',
         headers: {
             ...(cookie ? { cookie } : {}),
             ...(origin ? { origin } : {}),
             ...(json ? { 'content-type': 'application/json' } : {}),
+            ...(form ? { 'content-type': 'application/x-www-form-urlencoded' } : {}),
         },
-        body: json ? JSON.stringify(json) : undefined,
+        body: json ? JSON.stringify(json) : form,
     });
-    return { store, alice, bob, server, request, session };
+    return { store, alice, bob, server, request, session, popscore };
 }
 
 test('calendar lists releases from the requested day with escaped names', async (t) => {
@@ -237,6 +240,7 @@ test('an old releases cache without precision is rebuilt', async () => {
 });
 
 test('reminders page separates upcoming, undated and released games', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-10T12:00:00Z') });
     const ctx = await startServer();
     t.after(() => ctx.server.close());
     ctx.store.upsertGames([{ id: 60, name: 'Long Released', hypes: 0, releases: [{ day: '2020-01-10', platform: 'PC' }] }]);
@@ -290,4 +294,112 @@ test('refresh starts a silent SSO request and falls back to a regular login', as
     const callback = await ctx.request('/auth/callback?error=login_required&state=x');
     assert.equal(callback.status, 302);
     assert.equal(callback.headers.get('location'), '/login?return=%2Freminders');
+});
+
+test('filter submissions save account choices but explicit URLs do not, and none differs from All', async (t) => {
+    const ctx = await startServer();
+    t.after(() => ctx.server.close());
+    const cookie = ctx.session(ctx.alice);
+    ctx.store.upsertGames([{ id: 90, name: 'Mobile exclusive', releases: [{ day: '2026-11-14', platform: 'iOS' }] }]);
+    const defaultPage = await (await ctx.request('/?from=2026-11-14', { cookie })).text();
+    assert.doesNotMatch(defaultPage, /Mobile exclusive/);
+    assert.match(defaultPage, /value="PC" checked/);
+    assert.doesNotMatch(defaultPage, /value="iOS" checked/);
+    const submit = form => ctx.request('/filters', { method: 'POST', origin: ORIGIN, cookie, form: new URLSearchParams(form) });
+    const saved = await submit({ destination: '/', from: '2026-11-14', platform: 'Switch' });
+    assert.equal(saved.status, 303);
+    const restored = await (await ctx.request(saved.headers.get('location'), { cookie: ctx.session(ctx.alice) })).text();
+    assert.match(restored, /Warhammer Survivors/);
+    assert.doesNotMatch(restored, /Ova Magica/);
+    const override = await (await ctx.request('/?from=2026-11-14&platform=PlayStation+5', { cookie })).text();
+    assert.match(override, /Ova Magica/);
+    assert.deepEqual(ctx.store.platformPreferences(ctx.alice.id, ctx.store.allPlatforms()), ['Switch']);
+    assert.ok(ctx.store.platformPreferences(ctx.bob.id, ctx.store.allPlatforms()).includes('PC'));
+    await submit({ destination: '/', from: '2026-11-14' });
+    const none = await (await ctx.request('/?from=2026-11-14', { cookie })).text();
+    assert.doesNotMatch(none, /class="card/);
+    const emptyOverride = await (await ctx.request('/?from=2026-11-14&filtered=1', { cookie })).text();
+    assert.match(emptyOverride, /href="\/hot\?filtered=1"/);
+    assert.match(emptyOverride, /name="filtered" value="1"/);
+    await submit({ destination: '/', all: '1' });
+    assert.ok(ctx.store.platformPreferences(ctx.alice.id, ctx.store.allPlatforms()).includes('iOS'));
+    const anonymous = await ctx.request('/filters', { method: 'POST', origin: ORIGIN, form: new URLSearchParams({ destination: '/' }) });
+    assert.equal(anonymous.headers.get('location'), '/?filtered=1');
+    assert.equal((await ctx.request('/filters', { method: 'POST', cookie, form: new URLSearchParams({ destination: '/' }) })).status, 403);
+    assert.equal((await submit({ destination: '//evil.test' })).status, 400);
+    assert.equal((await submit({ destination: '/', platform: 'Invalid' })).status, 400);
+});
+
+test('all platforms can be selected beyond the former 20-platform limit', async (t) => {
+    const ctx = await startServer();
+    t.after(() => ctx.server.close());
+    const platforms = Array.from({ length: 30 }, (_, i) => `Console ${i}`);
+    ctx.store.upsertGames(platforms.map((platform, i) => ({ id: 100 + i, name: `Game for ${platform}`, releases: [{ day: '2026-11-14', platform }] })));
+    const form = new URLSearchParams({ destination: '/', from: '2026-11-14' });
+    for (const platform of platforms) form.append('platform', platform);
+    const response = await ctx.request('/filters', { method: 'POST', origin: ORIGIN, form });
+    const page = await (await ctx.request(response.headers.get('location'))).text();
+    assert.match(page, /Game for Console 29/);
+    assert.match(page, /value="Console 29" checked/);
+    assert.equal((await ctx.request(`/?platform=${'x'.repeat(101)}`)).status, 400);
+});
+
+test('only the access token client role produces an admin grant bounded by access token expiry', () => {
+    const exp = Math.floor(Date.now() / 1000) + 60;
+    const identity = { iss: 'https://sso.example.test', sub: 'user-1', exp: exp + 300 };
+    const token = claims => `header.${Buffer.from(JSON.stringify({ ...identity, exp, ...claims })).toString('base64url')}.signature`;
+    assert.equal(adminUntilFromAccessToken(token({ resource_access: { 'realm-management': { roles: ['manage-realm'] } } }), identity), exp);
+    for (const claims of [
+        {}, { preferred_username: 'vimaster' },
+        { realm_access: { roles: ['manage-realm'] } },
+        { resource_access: { other: { roles: ['manage-realm'] } } },
+        { resource_access: { 'realm-management': { roles: 'manage-realm' } } },
+        { resource_access: { 'realm-management': { roles: ['view-realm'] } } },
+    ]) assert.equal(adminUntilFromAccessToken(token(claims), identity), 0);
+    const adminIdentity = { ...identity, resource_access: { 'realm-management': { roles: ['manage-realm'] } } };
+    assert.equal(adminUntilFromAccessToken(token({}), adminIdentity), 0, 'ID token roles must not grant admin access');
+    for (const invalid of ['bad', 'header.@@.signature', 'header.bnVsbA.signature', token({ sub: 'other' }),
+        token({ iss: 'https://other.example.test' }), token({ exp: 0 }), token({ exp: 'invalid' })]) {
+        assert.throws(() => adminUntilFromAccessToken(invalid, identity), /access token/);
+    }
+});
+
+test('admin-only widget and APIs expose asynchronous progress and cancellation, not to ordinary sessions', async (t) => {
+    let activeSignal;
+    const igdb = {
+        configured: true,
+        async popularityByIds(ids, signal) {
+            activeSignal = signal;
+            return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+        },
+    };
+    const ctx = await startServer({ igdb, withPopscore: true });
+    t.after(async () => { await ctx.popscore.stop(); ctx.server.close(); });
+    const admin = ctx.session(ctx.alice, Math.floor(Date.now() / 1000) + 3600);
+    const normal = ctx.session(ctx.bob);
+    const expired = ctx.session(ctx.alice, Math.floor(Date.now() / 1000) - 1);
+    for (const cookie of [normal, expired]) {
+        const page = await (await ctx.request('/reminders', { cookie })).text();
+        assert.doesNotMatch(page, /data-popscore/);
+    }
+    const page = await (await ctx.request('/reminders', { cookie: admin })).text();
+    assert.match(page, /data-popscore/);
+    assert.match(page, /Next refresh: .*07:00:00 Europe\/Berlin/);
+    for (const [path, method] of [['/api/popscore', 'GET'], ['/api/popscore/start', 'POST'], ['/api/popscore/cancel', 'POST']]) {
+        assert.equal((await ctx.request(path, { method, origin: ORIGIN })).status, 401);
+        assert.equal((await ctx.request(path, { method, origin: ORIGIN, cookie: normal })).status, 403);
+        assert.equal((await ctx.request(path, { method, origin: ORIGIN, cookie: expired })).status, 403);
+    }
+    assert.equal((await ctx.request('/api/popscore/start', { method: 'POST', cookie: admin })).status, 403);
+    const started = await ctx.request('/api/popscore/start', { method: 'POST', cookie: admin, origin: ORIGIN });
+    assert.equal(started.status, 202);
+    assert.equal((await ctx.request('/healthz')).status, 200);
+    const status = await (await ctx.request('/api/popscore', { cookie: admin })).json();
+    assert.equal(status.running, true);
+    assert.equal(status.job.total, 8);
+    assert.equal((await ctx.request('/api/popscore/start', { method: 'POST', cookie: admin, origin: ORIGIN })).status, 409);
+    assert.equal((await ctx.request('/api/popscore/cancel', { method: 'POST', cookie: admin, origin: ORIGIN })).status, 202);
+    assert.equal(activeSignal.aborted, true);
+    if (ctx.popscore.running) await ctx.popscore.running;
+    assert.equal(ctx.popscore.status().job.state, 'canceled');
 });

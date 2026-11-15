@@ -1,12 +1,13 @@
 import { addDays, dayInZone, dayToUnix } from './time.js';
 
 export class Sync {
-    constructor({ store, igdb, config, log = console }) {
+    constructor({ store, igdb, config, popscore = null, log = console }) {
         this.store = store;
         this.igdb = igdb;
         this.config = config;
         this.log = log;
         this.running = null;
+        this.popscore = popscore;
     }
 
     // Tracked games are refreshed individually so reminders outside the window stay current
@@ -15,6 +16,7 @@ export class Sync {
         if (!ids.length || !this.igdb.configured) return 0;
         const games = await this.igdb.gamesByIds(ids);
         this.store.upsertGames(games);
+        this.popscore?.requestCold();
         return games.length;
     }
 
@@ -30,6 +32,7 @@ export class Sync {
             const to = dayToUnix(addDays(today, this.config.syncDaysAhead + 1));
             const games = await this.igdb.gamesReleasingBetween(from, to);
             this.store.upsertGames(games);
+            this.popscore?.requestCold();
             const tracked = await this.refreshTracked();
             this.store.setMeta('last_sync', new Date().toISOString());
             this.store.pruneSessions();
